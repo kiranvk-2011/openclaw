@@ -43,7 +43,7 @@ function isMigrationState(value: unknown): value is MatrixLegacyCryptoMigrationS
 
 async function resolvePendingMigrationStatePath(params: {
   stateDir: string;
-  auth: Pick<MatrixAuth, "homeserver" | "userId" | "accessToken" | "accountId">;
+  auth: Pick<MatrixAuth, "homeserver" | "userId" | "accessToken" | "accountId" | "deviceId">;
 }): Promise<{
   statePath: string;
   value: MatrixLegacyCryptoMigrationState | null;
@@ -53,6 +53,7 @@ async function resolvePendingMigrationStatePath(params: {
     userId: params.auth.userId,
     accessToken: params.auth.accessToken,
     accountId: params.auth.accountId,
+    deviceId: params.auth.deviceId,
     stateDir: params.stateDir,
   });
   const directStatePath = path.join(rootDir, "legacy-crypto-migration.json");
@@ -89,7 +90,7 @@ async function resolvePendingMigrationStatePath(params: {
 
 export async function maybeRestoreLegacyMatrixBackup(params: {
   client: Pick<MatrixClient, "restoreRoomKeyBackup">;
-  auth: Pick<MatrixAuth, "homeserver" | "userId" | "accessToken" | "accountId">;
+  auth: Pick<MatrixAuth, "homeserver" | "userId" | "accessToken" | "accountId" | "deviceId">;
   env?: NodeJS.ProcessEnv;
   stateDir?: string;
 }): Promise<MatrixLegacyCryptoRestoreResult> {

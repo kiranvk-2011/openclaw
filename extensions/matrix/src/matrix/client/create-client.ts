@@ -31,6 +31,7 @@ export async function createMatrixClient(params: {
     userId,
     accessToken: params.accessToken,
     accountId: params.accountId,
+    deviceId: params.deviceId,
     env,
   });
   await maybeMigrateLegacyStorage({
@@ -44,6 +45,7 @@ export async function createMatrixClient(params: {
     homeserver,
     userId,
     accountId: params.accountId,
+    deviceId: params.deviceId,
   });
 
   const cryptoDatabasePrefix = `openclaw-matrix-${storagePaths.accountKey}-${storagePaths.tokenHash}`;

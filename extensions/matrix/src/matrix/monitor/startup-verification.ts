@@ -51,6 +51,7 @@ function resolveStartupVerificationStatePath(params: {
     userId: params.auth.userId,
     accessToken: params.auth.accessToken,
     accountId: params.auth.accountId,
+    deviceId: params.auth.deviceId,
     env: params.env,
   });
   return path.join(storagePaths.rootDir, STARTUP_VERIFICATION_STATE_FILENAME);

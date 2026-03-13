@@ -18,11 +18,20 @@ const THREAD_BINDINGS_FILENAME = "thread-bindings.json";
 const LEGACY_CRYPTO_MIGRATION_FILENAME = "legacy-crypto-migration.json";
 const RECOVERY_KEY_FILENAME = "recovery-key.json";
 const IDB_SNAPSHOT_FILENAME = "crypto-idb-snapshot.json";
+const STARTUP_VERIFICATION_FILENAME = "startup-verification.json";
 
 type LegacyMoveRecord = {
   sourcePath: string;
   targetPath: string;
   label: string;
+};
+
+type StoredRootMetadata = {
+  homeserver?: string;
+  userId?: string;
+  accountId?: string;
+  accessTokenHash?: string;
+  deviceId?: string | null;
 };
 
 function resolveLegacyStoragePaths(env: NodeJS.ProcessEnv = process.env): {
@@ -88,9 +97,84 @@ function resolveStorageRootMtimeMs(rootDir: string): number {
   }
 }
 
+function readStoredRootMetadata(rootDir: string): StoredRootMetadata {
+  const metadata: StoredRootMetadata = {};
+
+  try {
+    const parsed = JSON.parse(
+      fs.readFileSync(path.join(rootDir, STORAGE_META_FILENAME), "utf8"),
+    ) as Partial<StoredRootMetadata>;
+    if (typeof parsed.homeserver === "string" && parsed.homeserver.trim()) {
+      metadata.homeserver = parsed.homeserver.trim();
+    }
+    if (typeof parsed.userId === "string" && parsed.userId.trim()) {
+      metadata.userId = parsed.userId.trim();
+    }
+    if (typeof parsed.accountId === "string" && parsed.accountId.trim()) {
+      metadata.accountId = parsed.accountId.trim();
+    }
+    if (typeof parsed.accessTokenHash === "string" && parsed.accessTokenHash.trim()) {
+      metadata.accessTokenHash = parsed.accessTokenHash.trim();
+    }
+    if (typeof parsed.deviceId === "string" && parsed.deviceId.trim()) {
+      metadata.deviceId = parsed.deviceId.trim();
+    }
+  } catch {
+    // ignore missing or malformed storage metadata
+  }
+
+  try {
+    const parsed = JSON.parse(
+      fs.readFileSync(path.join(rootDir, STARTUP_VERIFICATION_FILENAME), "utf8"),
+    ) as { deviceId?: unknown };
+    if (!metadata.deviceId && typeof parsed.deviceId === "string" && parsed.deviceId.trim()) {
+      metadata.deviceId = parsed.deviceId.trim();
+    }
+  } catch {
+    // ignore missing or malformed verification state
+  }
+
+  return metadata;
+}
+
+function isCompatibleStorageRoot(params: {
+  candidateRootDir: string;
+  homeserver: string;
+  userId: string;
+  accountKey: string;
+  deviceId?: string | null;
+}): boolean {
+  const metadata = readStoredRootMetadata(params.candidateRootDir);
+  if (metadata.homeserver && metadata.homeserver !== params.homeserver) {
+    return false;
+  }
+  if (metadata.userId && metadata.userId !== params.userId) {
+    return false;
+  }
+  if (
+    metadata.accountId &&
+    normalizeAccountId(metadata.accountId) !== normalizeAccountId(params.accountKey)
+  ) {
+    return false;
+  }
+  if (
+    params.deviceId &&
+    metadata.deviceId &&
+    metadata.deviceId.trim() &&
+    metadata.deviceId.trim() !== params.deviceId.trim()
+  ) {
+    return false;
+  }
+  return true;
+}
+
 function resolvePreferredMatrixStorageRoot(params: {
   canonicalRootDir: string;
   canonicalTokenHash: string;
+  homeserver: string;
+  userId: string;
+  accountKey: string;
+  deviceId?: string | null;
 }): {
   rootDir: string;
   tokenHash: string;
@@ -122,6 +206,17 @@ function resolvePreferredMatrixStorageRoot(params: {
       continue;
     }
     const candidateRootDir = path.join(parentDir, entry.name);
+    if (
+      !isCompatibleStorageRoot({
+        candidateRootDir,
+        homeserver: params.homeserver,
+        userId: params.userId,
+        accountKey: params.accountKey,
+        deviceId: params.deviceId,
+      })
+    ) {
+      continue;
+    }
     const candidateScore = scoreStorageRoot(candidateRootDir);
     if (candidateScore <= 0) {
       continue;
@@ -153,6 +248,7 @@ export function resolveMatrixStoragePaths(params: {
   userId: string;
   accessToken: string;
   accountId?: string | null;
+  deviceId?: string | null;
   env?: NodeJS.ProcessEnv;
   stateDir?: string;
 }): MatrixStoragePaths {
@@ -168,6 +264,10 @@ export function resolveMatrixStoragePaths(params: {
   const { rootDir, tokenHash } = resolvePreferredMatrixStorageRoot({
     canonicalRootDir: canonical.rootDir,
     canonicalTokenHash: canonical.tokenHash,
+    homeserver: params.homeserver,
+    userId: params.userId,
+    accountKey: canonical.accountKey,
+    deviceId: params.deviceId,
   });
   return {
     rootDir,
@@ -301,6 +401,7 @@ export function writeStorageMeta(params: {
   homeserver: string;
   userId: string;
   accountId?: string | null;
+  deviceId?: string | null;
 }): void {
   try {
     const payload = {
@@ -308,6 +409,7 @@ export function writeStorageMeta(params: {
       userId: params.userId,
       accountId: params.accountId ?? DEFAULT_ACCOUNT_KEY,
       accessTokenHash: params.storagePaths.tokenHash,
+      deviceId: params.deviceId ?? null,
       createdAt: new Date().toISOString(),
     };
     fs.mkdirSync(params.storagePaths.rootDir, { recursive: true });

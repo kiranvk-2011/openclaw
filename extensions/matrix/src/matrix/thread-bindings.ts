@@ -179,6 +179,7 @@ function resolveBindingsPath(params: {
     userId: params.auth.userId,
     accessToken: params.auth.accessToken,
     accountId: params.accountId,
+    deviceId: params.auth.deviceId,
     env: params.env,
   });
   return path.join(storagePaths.rootDir, "thread-bindings.json");

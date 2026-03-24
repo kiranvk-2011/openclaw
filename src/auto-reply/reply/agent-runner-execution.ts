@@ -99,6 +99,17 @@ function buildCopilotCooldownMessage(err: unknown): string {
   return "⚠️ All models are temporarily rate-limited. Please try again in a few minutes.";
 }
 
+function isPureTransientRateLimitSummary(err: unknown): boolean {
+  return (
+    isFallbackSummaryError(err) &&
+    err.attempts.length > 0 &&
+    err.attempts.every((attempt) => {
+      const reason = attempt.reason;
+      return reason === "rate_limit" || reason === "overloaded";
+    })
+  );
+}
+
 export async function runAgentTurnWithFallback(params: {
   commandBody: string;
   followupRun: FollowupRun;
@@ -679,14 +690,11 @@ export async function runAgentTurnWithFallback(params: {
       defaultRuntime.error(`Embedded agent failed before reply: ${message}`);
       // Only classify as rate-limit when we have concrete evidence: either
       // the error message itself is a rate-limit string, or the fallback
-      // chain exhaustion includes at least one rate_limit / overloaded attempt.
-      // Using `.some()` intentionally: when any attempt is rate-limited, the
-      // countdown message is more actionable than the generic failure text,
-      // even if other attempts failed for different reasons (auth, etc.).
-      const isRateLimit =
-        isRateLimitErrorMessage(message) ||
-        (isFallbackSummaryError(err) &&
-          err.attempts.some((a) => a.reason === "rate_limit" || a.reason === "overloaded"));
+      // chain exhaustion is purely transient (`rate_limit` / `overloaded`).
+      // Mixed-cause failures (for example `rate_limit` + `billing`) should
+      // keep the generic failure text instead of showing a misleading retry
+      // countdown sourced from an unrelated cooldown window.
+      const isRateLimit = isRateLimitErrorMessage(message) || isPureTransientRateLimitSummary(err);
       const safeMessage = isTransientHttp
         ? sanitizeUserFacingText(message, { errorContext: true })
         : message;

@@ -252,19 +252,26 @@ function resolveFallbackSoonestCooldownExpiry(params: {
     readOnly: true,
     allowKeychainPrompt: false,
   });
-  const allProfileIds = new Set<string>();
+  let soonest: number | null = null;
   for (const candidate of params.candidates) {
     const ids = resolveAuthProfileOrder({
       cfg: params.cfg,
       store: refreshedStore,
       provider: candidate.provider,
     });
-    for (const id of ids) {
-      allProfileIds.add(id);
+    const candidateSoonest = getSoonestCooldownExpiry(refreshedStore, ids, {
+      forModel: candidate.model,
+    });
+    if (
+      typeof candidateSoonest === "number" &&
+      Number.isFinite(candidateSoonest) &&
+      (soonest === null || candidateSoonest < soonest)
+    ) {
+      soonest = candidateSoonest;
     }
   }
 
-  return getSoonestCooldownExpiry(refreshedStore, [...allProfileIds]);
+  return soonest;
 }
 
 function resolveImageFallbackCandidates(params: {
@@ -452,6 +459,7 @@ function shouldProbePrimaryDuringCooldown(params: {
   throttleKey: string;
   authStore: ReturnType<typeof ensureAuthProfileStore>;
   profileIds: string[];
+  model: string;
 }): boolean {
   if (!params.isPrimary || !params.hasFallbackCandidates) {
     return false;
@@ -461,7 +469,10 @@ function shouldProbePrimaryDuringCooldown(params: {
     return false;
   }
 
-  const soonest = getSoonestCooldownExpiry(params.authStore, params.profileIds);
+  const soonest = getSoonestCooldownExpiry(params.authStore, params.profileIds, {
+    now: params.now,
+    forModel: params.model,
+  });
   if (soonest === null || !Number.isFinite(soonest)) {
     return true;
   }
@@ -512,6 +523,7 @@ function resolveCooldownDecision(params: {
     throttleKey: params.probeThrottleKey,
     authStore: params.authStore,
     profileIds: params.profileIds,
+    model: params.candidate.model,
   });
 
   const inferredReason =

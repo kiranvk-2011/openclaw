@@ -72,21 +72,15 @@ export function isProfileInCooldown(
   if (!stats) {
     return false;
   }
+  const ts = now ?? Date.now();
   // Model-aware bypass: if the cooldown was caused by a rate_limit on a
   // specific model and the caller is requesting a *different* model, allow it.
   // We still honour any active billing/auth disable (`disabledUntil`) — those
   // are profile-wide and must not be short-circuited by model scoping.
-  if (
-    forModel &&
-    stats.cooldownReason === "rate_limit" &&
-    stats.cooldownModel &&
-    stats.cooldownModel !== forModel &&
-    !isActiveUnusableWindow(stats.disabledUntil, now ?? Date.now())
-  ) {
+  if (shouldBypassModelScopedCooldown(stats, ts, forModel)) {
     return false;
   }
   const unusableUntil = resolveProfileUnusableUntil(stats);
-  const ts = now ?? Date.now();
   return unusableUntil ? ts < unusableUntil : false;
 }
 
@@ -181,11 +175,16 @@ export function resolveProfilesUnavailableReason(params: {
 export function getSoonestCooldownExpiry(
   store: AuthProfileStore,
   profileIds: string[],
+  options?: { now?: number; forModel?: string },
 ): number | null {
+  const ts = options?.now ?? Date.now();
   let soonest: number | null = null;
   for (const id of profileIds) {
     const stats = store.usageStats?.[id];
     if (!stats) {
+      continue;
+    }
+    if (shouldBypassModelScopedCooldown(stats, ts, options?.forModel)) {
       continue;
     }
     const until = resolveProfileUnusableUntil(stats);
@@ -197,6 +196,20 @@ export function getSoonestCooldownExpiry(
     }
   }
   return soonest;
+}
+
+function shouldBypassModelScopedCooldown(
+  stats: Pick<ProfileUsageStats, "cooldownReason" | "cooldownModel" | "disabledUntil">,
+  now: number,
+  forModel?: string,
+): boolean {
+  return !!(
+    forModel &&
+    stats.cooldownReason === "rate_limit" &&
+    stats.cooldownModel &&
+    stats.cooldownModel !== forModel &&
+    !isActiveUnusableWindow(stats.disabledUntil, now)
+  );
 }
 
 /**

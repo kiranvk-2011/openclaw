@@ -30,6 +30,7 @@ const TELEGRAM_READ_ONLY_STATUS_COMMAND_KEYS = new Set([
 ]);
 
 const TELEGRAM_ACTIVE_RUN_CONTROL_COMMAND_KEYS = new Set(["queue", "steer"]);
+const TELEGRAM_SESSION_CONTROL_COMMAND_KEYS = new Set(["new", "reset"]);
 
 type TelegramSequentialKeyContext = {
   chat?: { id?: number };
@@ -130,6 +131,24 @@ function isTelegramActiveRunControlLaneText(params: {
   return command ? TELEGRAM_ACTIVE_RUN_CONTROL_COMMAND_KEYS.has(command.key) : false;
 }
 
+function isTelegramSessionControlCommand(params: {
+  rawText?: string;
+  botUsername?: string;
+}): boolean {
+  // Session lifecycle commands (/new, /reset) must bypass the per-topic
+  // sequential queue so they execute immediately even when an agent run is
+  // active; otherwise they queue behind the running turn and never actually
+  // reset the session (upstream PR #71563, carried by this fork).
+  const alias = resolveTelegramCommandAliasForControlLane(params.rawText, params.botUsername);
+  if (!alias) {
+    return false;
+  }
+  const command = listChatCommands().find((entry) =>
+    entry.textAliases.some((candidate) => candidate.trim().toLowerCase() === alias),
+  );
+  return command ? TELEGRAM_SESSION_CONTROL_COMMAND_KEYS.has(command.key) : false;
+}
+
 function isTelegramControlLaneText(params: { rawText?: string; botUsername?: string }): boolean {
   if (
     isAbortRequestText(
@@ -143,6 +162,9 @@ function isTelegramControlLaneText(params: { rawText?: string; botUsername?: str
     return true;
   }
   if (isTelegramActiveRunControlLaneText(params)) {
+    return true;
+  }
+  if (isTelegramSessionControlCommand(params)) {
     return true;
   }
   return isTelegramReadOnlyControlLaneText(params);

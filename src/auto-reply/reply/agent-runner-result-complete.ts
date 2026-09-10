@@ -25,6 +25,7 @@ import {
 import { readPostCompactionContext } from "./post-compaction-context.js";
 import { warnPrivateMessageToolFinal } from "./private-message-tool-final.js";
 import { enqueueFollowupRun, refreshQueuedFollowupSession } from "./queue.js";
+import { isDirectedSourceReplyTurn } from "./source-reply-delivery-mode.js";
 import {
   buildStrandedReplyDeliveryFailurePayload,
   resolveStrandedReplyRecovery,
@@ -159,6 +160,16 @@ export async function completeReplyAgentRun(input: {
     );
     // Heartbeats already deliver fallback finals via sendDurableMessageBatch;
     // recovering here would duplicate that message.
+    //
+    // A directly-addressed turn in a group topic still comes through as a
+    // room_event, so guarding on InboundEventKind alone silently drops the
+    // model's answer when it skips the message tool. Downgrade the guard to
+    // *ambient* room events (undirected chatter) using the same directed-turn
+    // discriminator the dispatch/get-reply-run-context paths already use.
+    // Fixes openclaw/openclaw#139599.
+    const isDirectChatCompletion = sessionCtx.ChatType === "direct" || sessionCtx.ChatType === "dm";
+    const isDirectedTurn = isDirectedSourceReplyTurn(sessionCtx, cfg, isDirectChatCompletion);
+    const isAmbientRoomEvent = sessionCtx.InboundEventKind === "room_event" && !isDirectedTurn;
     const recovery = resolveStrandedReplyRecovery({
       base: followupRun,
       payloads: finalPayloads,
@@ -167,7 +178,7 @@ export async function completeReplyAgentRun(input: {
       sendPolicyDenied: sourceReplyPolicy.sendPolicyDenied,
       successfulSourceReplyDelivery: completedSourceReplyDelivery,
       isHeartbeat,
-      isRoomEvent: sessionCtx.InboundEventKind === "room_event",
+      isRoomEvent: isAmbientRoomEvent,
     });
     if (recovery.kind === "retry" || (recovery.kind === "diagnostic" && recovery.warn)) {
       warnPrivateMessageToolFinal({

@@ -112,6 +112,9 @@ function observeModelCallIterator<T>(
         lifecycle.observer.observeResponseChunk(lifecycle.startedAt, chunk);
         lifecycle.observer.maybeEmitStreamProgress(lifecycle.eventBase);
         yield chunk;
+        await new Promise<void>((resolve) => {
+          setImmediate(resolve);
+        });
       }
       // EOF can precede result decorators' settlement. Retain that work through
       // owner cleanup without delaying drain-only consumers or losing failures.

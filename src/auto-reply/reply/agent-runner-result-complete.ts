@@ -26,6 +26,7 @@ import {
 import { readPostCompactionContext } from "./post-compaction-context.js";
 import { warnPrivateMessageToolFinal } from "./private-message-tool-final.js";
 import { enqueueFollowupRun, refreshQueuedFollowupSession } from "./queue.js";
+import { isExplicitSourceReplyCommand } from "./source-reply-delivery-mode.js";
 import {
   buildStrandedReplyDeliveryFailurePayload,
   resolveStrandedReplyRecovery,
@@ -163,6 +164,19 @@ export async function completeReplyAgentRun(input: {
     );
     // Heartbeats already deliver fallback finals via sendDurableMessageBatch;
     // recovering here would duplicate that message.
+    //
+    // A directly-addressed turn in a group topic can still arrive as a
+    // room_event, so guarding on InboundEventKind alone silently drops the
+    // model's answer when it skips the message tool. Only *ambient* room
+    // events (undirected chatter) stay unrecovered. Fixes openclaw/openclaw#139599.
+    // (fork carry v2, 2026-09-20: upstream #152786 removed isDirectedSourceReplyTurn;
+    // the discriminator is inlined from its last definition.)
+    const isDirectChatCompletion = sessionCtx.ChatType === "direct" || sessionCtx.ChatType === "dm";
+    const isDirectedTurn =
+      isExplicitSourceReplyCommand(sessionCtx, cfg) ||
+      isDirectChatCompletion ||
+      sessionCtx.WasMentioned === true;
+    const isAmbientRoomEvent = sessionCtx.InboundEventKind === "room_event" && !isDirectedTurn;
     const recovery = resolveStrandedReplyRecovery({
       base: followupRun,
       payloads: finalPayloads,
@@ -171,7 +185,7 @@ export async function completeReplyAgentRun(input: {
       sendPolicyDenied: sourceReplyPolicy.sendPolicyDenied,
       successfulSourceReplyDelivery: completedSourceReplyDelivery,
       isHeartbeat,
-      isRoomEvent: sessionCtx.InboundEventKind === "room_event",
+      isRoomEvent: isAmbientRoomEvent,
     });
     if (recovery.kind === "retry" || (recovery.kind === "diagnostic" && recovery.warn)) {
       warnPrivateMessageToolFinal({

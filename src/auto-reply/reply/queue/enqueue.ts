@@ -376,7 +376,13 @@ function resolveParkedFallbackOutcome(key: string, run: FollowupRun): ParkedStee
   if (queue?.summarySources.includes(run)) {
     return "summarized";
   }
-  return "dropped";
+  // Summary-line overflow moves a source into an elision as a compact copy; it is
+  // still delivered by the summary turn until the elision cap evicts that copy.
+  const elided = queue?.summaryElisions.some((entry) => {
+    const compact = entry.sourceRefs.get(run);
+    return compact !== undefined && entry.sources.includes(compact);
+  });
+  return elided ? "summarized" : "dropped";
 }
 
 type ParkedSteerReservation = {

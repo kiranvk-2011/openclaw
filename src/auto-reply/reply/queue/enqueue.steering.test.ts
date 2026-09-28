@@ -203,4 +203,45 @@ describe("parked steering admission", () => {
       }
     },
   );
+
+  it("reports a run moved into a summary elision as summarized, not dropped", async () => {
+    const key = "steer-fallback-elided-summary";
+    keys.add(key);
+    const settings = createQueueSettings({ mode: "steer", cap: 1, dropPolicy: "summarize" });
+    const active = createQueueTestRun({ prompt: "active delivery", messageId: "active" });
+    const first = createQueueTestRun({ prompt: "first fallback", messageId: "first" });
+    const middle = createQueueTestRun({ prompt: "middle fallback", messageId: "middle" });
+    const last = createQueueTestRun({ prompt: "last fallback", messageId: "last" });
+    const activeEntered = createDeferred();
+    const releaseActive = createDeferred();
+    const runFollowup = async (run: FollowupRun) => {
+      if (run === active) {
+        activeEntered.resolve();
+        await releaseActive.promise;
+      }
+    };
+    enqueueFollowupRun(key, active, settings, "message-id", runFollowup);
+    await activeEntered.promise;
+    try {
+      const firstReservation = parkSteerCandidate(key, first, settings, runFollowup)!;
+      const middleReservation = parkSteerCandidate(key, middle, settings, runFollowup)!;
+      const lastReservation = parkSteerCandidate(key, last, settings, runFollowup)!;
+      await expect(firstReservation.admit()).resolves.toBe("steer");
+      expect(firstReservation.fallback()).toBe("at-cap");
+      await expect(middleReservation.admit()).resolves.toBe("steer");
+      expect(middleReservation.fallback()).toBe("at-cap");
+      await expect(lastReservation.admit()).resolves.toBe("steer");
+      // Settling the last park reconciles the cap: first and middle overflow into the
+      // summary, and the one-line summary limit elides first's line.
+      expect(lastReservation.fallback()).toBe("queued");
+      const queue = getExistingFollowupQueue(key);
+      expect(queue?.summarySources).toEqual([middle]);
+      expect(queue?.summaryElisions.some((entry) => entry.sourceRefs.has(first))).toBe(true);
+      // The disposition is read from the queue, so a repeated fallback reports it again.
+      expect(firstReservation.fallback()).toBe("summarized");
+      expect(middleReservation.fallback()).toBe("summarized");
+    } finally {
+      releaseActive.resolve();
+    }
+  });
 });

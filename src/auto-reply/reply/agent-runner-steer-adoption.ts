@@ -27,6 +27,7 @@ import {
 } from "./reply-run-registry.js";
 import { refreshReplyOperationTyping } from "./reply-run-typing.js";
 import { buildChannelSourceTurnId } from "./source-turn-id.js";
+import { sendSteerReceipt } from "./steer-receipt.js";
 import type { TypingSignaler } from "./typing-mode.js";
 
 type ActiveReplySteerParams = {
@@ -135,6 +136,12 @@ export async function runActiveReplySteer(
     if (reason) {
       logVerbose(`queue: active session ${steerSessionId} rejected steering (${reason})`);
     }
+    // The message now waits for its own turn; say so instead of staying silent.
+    void sendSteerReceipt({
+      followupRun,
+      kind: "queued",
+      sourceMessageId: params.sessionCtx.MessageSid,
+    });
     await touchActiveSessionEntry();
     typing.cleanup();
     return "handled";
@@ -271,6 +278,12 @@ export async function runActiveReplySteer(
         `queue: active session ${steerSessionId} adoption finalizer failed: ${formatErrorMessage(finalization.adoptionError)}`,
       );
     }
+    // Accepted means the runtime took the input into this turn, not merely that it was offered.
+    void sendSteerReceipt({
+      followupRun,
+      kind: "steered",
+      sourceMessageId: params.sessionCtx.MessageSid,
+    });
     if (activeReplyOperation) {
       await refreshReplyOperationTyping(activeReplyOperation, {
         startIfIdle: typingSignals.shouldStartImmediately,

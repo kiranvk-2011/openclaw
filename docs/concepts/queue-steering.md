@@ -109,6 +109,24 @@ there across reconnects until consumed or canceled, without being sent again.
 
 Use `followup` or `collect` when you want messages to queue by default instead of steering the active run. Use `interrupt` when the newest prompt should replace the active run.
 
+## Steer receipts in chat channels
+
+Chat channels show nothing by default, so a sender cannot tell whether a message
+sent during a run joined it or is waiting. Set `messages.queue.steerReceipts: true`
+to reply to each such message in steer mode:
+
+- `🦞🛞 Current run steered with your new message.` once the active runtime has
+  taken the message into the running turn. For runtimes that steer at tool
+  boundaries, this arrives when the current tool call finishes, not when the
+  message is sent.
+- `⏳ Couldn't steer the current run; I'll answer this right after it.` when the
+  message falls back to a followup turn.
+
+Receipts are standalone replies to the steered message. They are not added to
+the session transcript and do not count as that message's reply, so the queued
+message still gets its real answer from the followup turn. Ambient room events
+never get a receipt. A failed receipt does not affect the run.
+
 ## Canceling a pending steer
 
 An authorized Gateway client can withdraw a message still waiting in the OpenClaw

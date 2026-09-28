@@ -89,6 +89,17 @@ describe("steer receipts", () => {
     );
   });
 
+  it.each([
+    ["at-cap", "may still be summarized or dropped"],
+    ["summarized", "goes into a summary"],
+    ["dropped", "was dropped. Please send it again"],
+  ] as const)("does not promise an answer for a %s fallback", async (kind, fragment) => {
+    await sendSteerReceipt({ followupRun: makeRun({}, true), kind });
+    const call = routeMocks.routeReply.mock.calls[0] as unknown as [{ payload: { text: string } }];
+    expect(call[0].payload.text).toContain(fragment);
+    expect(call[0].payload.text).not.toContain("I'll answer this right after it");
+  });
+
   it("stays silent for ambient room events and unroutable origins", async () => {
     await sendSteerReceipt({
       followupRun: makeRun({ currentInboundEventKind: "room_event" }, true),

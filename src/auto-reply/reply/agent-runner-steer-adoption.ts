@@ -123,7 +123,7 @@ export async function runActiveReplySteer(
   scheduleParkedFallback();
   releaseAdmissionTicket();
   const fallback = async (reason?: string): Promise<"handled"> => {
-    parked.fallback();
+    const outcome = parked.fallback();
     if (
       replyOperationRunState &&
       !(
@@ -136,10 +136,11 @@ export async function runActiveReplySteer(
     if (reason) {
       logVerbose(`queue: active session ${steerSessionId} rejected steering (${reason})`);
     }
-    // The message now waits for its own turn; say so instead of staying silent.
+    // Tell the sender where the message actually ended up: releasing the park
+    // reapplies queue overflow, so a fallback can be summarized or dropped.
     void sendSteerReceipt({
       followupRun,
-      kind: "queued",
+      kind: outcome,
       sourceMessageId: params.sessionCtx.MessageSid,
     });
     await touchActiveSessionEntry();

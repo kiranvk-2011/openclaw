@@ -135,13 +135,13 @@ describe("parked steering admission", () => {
       try {
         const firstReservation = parkSteerCandidate(key, first, settings, runFollowup)!;
         await expect(firstReservation.admit()).resolves.toBe("steer");
-        firstReservation.fallback();
+        expect(firstReservation.fallback()).toBe("queued");
         const newerReservation = parkSteerCandidate(key, newer, settings, runFollowup)!;
         await expect(newerReservation.admit()).resolves.toBe("steer");
         expect(getExistingFollowupQueue(key)?.items).toEqual([active, first, newer]);
         expect(disposition).not.toHaveBeenCalled();
         firstCurrent = false;
-        newerReservation.fallback();
+        expect(newerReservation.fallback()).toBe(dropPolicy === "new" ? "dropped" : "queued");
         expect(getExistingFollowupQueue(key)?.items).toEqual([
           active,
           dropPolicy === "new" ? first : newer,
@@ -156,6 +156,48 @@ describe("parked steering admission", () => {
               ? ["active delivery", "newer fallback"]
               : ["active delivery", expect.stringContaining("first fallback"), "newer fallback"],
         );
+      } finally {
+        releaseActive.resolve();
+      }
+    },
+  );
+
+  it.each(["summarize", "old", "new"] as const)(
+    "reports a non-final fallback while a sibling steer keeps overflow deferred (drop:%s)",
+    async (dropPolicy) => {
+      const key = `steer-fallback-deferred-${dropPolicy}`;
+      keys.add(key);
+      const settings = createQueueSettings({ mode: "steer", cap: 1, dropPolicy });
+      const active = createQueueTestRun({ prompt: "active delivery", messageId: "active" });
+      const first = createQueueTestRun({ prompt: "first fallback", messageId: "first" });
+      const newer = createQueueTestRun({ prompt: "newer fallback", messageId: "newer" });
+      const activeEntered = createDeferred();
+      const releaseActive = createDeferred();
+      const runFollowup = async (run: FollowupRun) => {
+        if (run === active) {
+          activeEntered.resolve();
+          await releaseActive.promise;
+        }
+      };
+      enqueueFollowupRun(key, active, settings, "message-id", runFollowup);
+      await activeEntered.promise;
+      try {
+        const firstReservation = parkSteerCandidate(key, first, settings, runFollowup)!;
+        const newerReservation = parkSteerCandidate(key, newer, settings, runFollowup)!;
+        await expect(firstReservation.admit()).resolves.toBe("steer");
+        // newer is still parked, so the cap is not reconciled yet.
+        expect(firstReservation.fallback()).toBe(dropPolicy === "new" ? "queued" : "at-cap");
+        await expect(newerReservation.admit()).resolves.toBe("steer");
+        const newerOutcome = newerReservation.fallback();
+        const queue = getExistingFollowupQueue(key);
+        if (dropPolicy === "new") {
+          expect(newerOutcome).toBe("dropped");
+          expect(queue?.items).toEqual([active, first]);
+        } else {
+          expect(newerOutcome).toBe("queued");
+          expect(queue?.items).toEqual([active, newer]);
+          expect(queue?.summarySources.includes(first)).toBe(dropPolicy === "summarize");
+        }
       } finally {
         releaseActive.resolve();
       }

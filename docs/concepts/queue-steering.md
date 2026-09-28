@@ -131,7 +131,13 @@ to reply to each such message in steer mode:
   boundaries, this arrives when the current tool call finishes, not when the
   message is sent.
 - `⏳ Couldn't steer the current run; I'll answer this right after it.` when the
-  message falls back to a followup turn.
+  message falls back to a followup turn and the queue keeps it.
+- When the fallback overflows `messages.queue.cap`, the receipt follows the
+  `messages.queue.drop` outcome instead of promising an answer: a summary notice
+  for `summarize`, or a "dropped, please send it again" notice for `old` and `new`.
+  If other steered messages are still pending and the queue is over its cap, the
+  outcome is not final yet, and the receipt says the message may still be
+  summarized or dropped.
 
 Receipts are standalone replies to the steered message. They are not added to
 the session transcript and do not count as that message's reply, so the queued

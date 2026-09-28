@@ -8,12 +8,21 @@ import { extractShortModelName } from "./response-prefix-template.js";
 
 const routeReplyRuntimeLoader = createLazyImportLoader(() => import("./route-reply.runtime.js"));
 
-/** What happened to a busy-time message in steer mode. */
-export type SteerReceiptKind = "steered" | "queued";
+/**
+ * What happened to a busy-time message in steer mode. Fallback kinds mirror the
+ * queue's disposition, so a receipt never promises an answer the queue will not give.
+ */
+export type SteerReceiptKind = "steered" | "queued" | "at-cap" | "summarized" | "dropped";
 
 const STEER_RECEIPT_TEXT: Readonly<Record<SteerReceiptKind, string>> = {
   steered: "🦞🛞 Current run steered with your new message.",
   queued: "⏳ Couldn't steer the current run; I'll answer this right after it.",
+  "at-cap":
+    "⏳ Couldn't steer the current run and the queue is at its cap; this message may still be summarized or dropped.",
+  summarized:
+    "⏳ Couldn't steer the current run and the queue is full; this message goes into a summary that I'll answer after it.",
+  dropped:
+    "⚠️ Couldn't steer the current run and the queue is full, so this message was dropped. Please send it again once the run finishes.",
 };
 
 /** Receipts are opt-in: without them steering stays silent, as it always has. */

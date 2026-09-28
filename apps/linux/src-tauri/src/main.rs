@@ -1,3 +1,4 @@
+mod chrome_setup;
 mod cli;
 #[cfg(target_os = "linux")]
 mod desktop_bridge;
@@ -52,7 +53,6 @@ use tauri::{
     WebviewWindowBuilder,
 };
 use tauri_plugin_deep_link::DeepLinkExt;
-use tauri_plugin_global_shortcut::{Code, Modifiers};
 use tauri_plugin_opener::OpenerExt;
 
 const CONNECTED_WATCH_INTERVAL: Duration = Duration::from_secs(15);
@@ -601,6 +601,7 @@ impl NavigationState {
 
 struct DesktopInner {
     cli: Mutex<Option<OpenClawCli>>,
+    chrome_setup: chrome_setup::ChromeSetup,
     navigation: Mutex<NavigationState>,
     operation: Mutex<()>,
     pending_approvals: Mutex<pending_approvals::PendingApprovalState>,
@@ -621,6 +622,7 @@ impl DesktopState {
         Self {
             inner: Arc::new(DesktopInner {
                 cli: Mutex::new(None),
+                chrome_setup: chrome_setup::ChromeSetup::default(),
                 navigation: Mutex::new(NavigationState::default()),
                 operation: Mutex::new(()),
                 pending_approvals: Mutex::new(pending_approvals::PendingApprovalState::default()),
@@ -805,6 +807,8 @@ impl DesktopState {
                 );
             }
         }
+
+        self.inner.chrome_setup.installed(app.clone(), cli.clone());
 
         self.inner
             .navigation
@@ -1579,18 +1583,12 @@ impl DesktopState {
     }
 
     pub(crate) fn resolve_cli(&self) -> Result<OpenClawCli, CliError> {
-        if let Some(cli) = self
-            .inner
-            .cli
-            .lock()
-            .expect("CLI mutex poisoned")
-            .clone()
-            .filter(OpenClawCli::is_available)
-        {
+        let mut cached = self.inner.cli.lock().expect("CLI mutex poisoned");
+        if let Some(cli) = cached.clone().filter(OpenClawCli::is_available) {
             return Ok(cli);
         }
         let cli = OpenClawCli::discover()?;
-        *self.inner.cli.lock().expect("CLI mutex poisoned") = Some(cli.clone());
+        *cached = Some(cli.clone());
         Ok(cli)
     }
 
@@ -3154,6 +3152,15 @@ async fn gateway_action(
 }
 
 fn main() {
+    // Xlib requires thread initialization before GTK opens a display. Older
+    // libX11 versions do not initialize it automatically for WebKit's threads.
+    #[cfg(target_os = "linux")]
+    assert_ne!(
+        unsafe { x11::xlib::XInitThreads() },
+        0,
+        "Could not initialize X11 thread safety."
+    );
+
     // AppIndicator uses the GTK application name for the tray menu heading.
     #[cfg(target_os = "linux")]
     gtk::glib::set_application_name("OpenClaw");
@@ -3177,14 +3184,10 @@ fn main() {
         builder.plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, shortcut, event| {
-                    if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                        if quickchat_shortcut_state.matches_shortcut(shortcut) {
-                            quickchat::toggle_quickchat(app);
-                        } else if shortcut
-                            .matches(Modifiers::CONTROL | Modifiers::SHIFT, Code::KeyO)
-                        {
-                            tray::show_window(app);
-                        }
+                    if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed
+                        && quickchat_shortcut_state.matches_shortcut(shortcut)
+                    {
+                        quickchat::toggle_quickchat(app);
                     }
                 })
                 .build(),
@@ -3339,6 +3342,8 @@ fn main() {
         #[cfg(target_os = "linux")]
         desktop_bridge::start(app.handle().clone());
         state.start_tunnel_monitor(app.handle().clone());
+        // Single-instance admission is complete; Chrome setup never follows a remote dashboard.
+        state.inner.chrome_setup.start(app.handle().clone());
         Ok(())
     });
     let builder = builder.invoke_handler(tauri::generate_handler![

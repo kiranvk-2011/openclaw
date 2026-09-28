@@ -10,8 +10,6 @@ import {
   isGatewaySuspendUnavailableError,
 } from "../../../packages/gateway-protocol/src/restart-unavailable.js";
 import type { ControlUiBootstrapProfileHint } from "../../../src/gateway/control-ui-bootstrap-contract.js";
-// Control UI module owns the application gateway store: the reactive
-// snapshot around GatewayBrowserClient consumed by the app shell.
 import type { EventLogEntry } from "../api/event-log.ts";
 import {
   GatewayBrowserClient,
@@ -152,6 +150,7 @@ export function createApplicationGateway(
         ? snapshot.suspensionPhase
         : undefined;
       snapshot.pluginCapabilities = null;
+      snapshot.usagePublications = undefined;
       scheduleOfflineIndicator();
     }
     if (metadataObserver.synchronize(previous, snapshot)) {
@@ -168,7 +167,10 @@ export function createApplicationGateway(
   };
   const recordGatewayEvent = (event: Parameters<GatewayEventListener>[0]) => {
     const eventClient = client;
-    if (event.event === "plugins.changed" && eventClient) {
+    if (
+      (event.event === "plugins.changed" || event.event === "plugins.controlUi.changed") &&
+      eventClient
+    ) {
       // Capability updates keep hello identity; reconnects replace it.
       const eventHello = snapshot.hello;
       const readCurrent = () =>
@@ -179,7 +181,7 @@ export function createApplicationGateway(
           : null;
       void import("./plugin-capabilities.runtime.ts")
         .then(({ refreshPluginCapabilities }) =>
-          refreshPluginCapabilities(event.payload, eventClient, readCurrent, setSnapshot, (url) =>
+          refreshPluginCapabilities(event, eventClient, readCurrent, setSnapshot, (url) =>
             canvasSurface.start(eventClient, canvasSurface.generation, url),
           ),
         )
@@ -188,6 +190,29 @@ export function createApplicationGateway(
             setSnapshot({ lastError: formatUiError(error) });
           }
         });
+    } else if (event.event === "chat.metadata.changed") {
+      const publication = asOptionalRecord(event.payload);
+      const agentId = publication?.agentId;
+      const usageUpdatedAt = publication?.usageUpdatedAt;
+      if (
+        typeof agentId === "string" &&
+        typeof usageUpdatedAt === "number" &&
+        usageUpdatedAt > (snapshot.usagePublications?.[agentId]?.usageUpdatedAt ?? 0)
+      ) {
+        setSnapshot({
+          usagePublications: {
+            ...snapshot.usagePublications,
+            [agentId]: {
+              usageUpdatedAt,
+              committedAt:
+                publication?.usageRefreshFailed === true
+                  ? (snapshot.usagePublications?.[agentId]?.committedAt ?? 0)
+                  : usageUpdatedAt,
+              usageRefreshFailed: publication?.usageRefreshFailed === true || undefined,
+            },
+          },
+        });
+      }
     } else if (event.event === "gateway.suspension") {
       const suspensionPhase = readSuspensionPhase(event.payload);
       if (suspensionPhase) {
@@ -214,7 +239,7 @@ export function createApplicationGateway(
       }
     }
     // Snapshot observers can replace their client before this event reaches the log.
-    if (!isCurrentClient(eventClient)) {
+    if (!isCurrentClient(eventClient) || eventLogListeners.size === 0) {
       return;
     }
     const entries = eventLog.record(event);
@@ -486,6 +511,7 @@ export function createApplicationGateway(
           : undefined;
         // Display-only evidence; admission is still re-derived from the next hello.
         setUnavailableDeadline("suspensionPhase", suspensionPhase ? 0 : undefined);
+        const closeReason = formatUiExternalText(reason);
         setSnapshot({
           client: nextClient,
           phase:
@@ -509,7 +535,11 @@ export function createApplicationGateway(
             ? null
             : error?.message
               ? formatUiError(error.message)
-              : `disconnected (${code}): ${formatUiExternalText(reason, t("common.unknown"))}`,
+              : closeReason
+                ? `disconnected (${code}): ${closeReason}`
+                : t(willRetry ? "connection.interruptedRetrying" : "connection.interrupted", {
+                    code: String(code),
+                  }),
           lastErrorCode: startupPending ? null : lastErrorCode,
           lastErrorAuthReason: startupPending ? null : readConnectionAuthReason(error?.details),
         });
@@ -616,7 +646,12 @@ export function createApplicationGateway(
     },
     subscribeEventLog: (listener) => {
       eventLogListeners.add(listener);
-      return () => eventLogListeners.delete(listener);
+      return () => {
+        eventLogListeners.delete(listener);
+        if (eventLogListeners.size === 0) {
+          eventLog.clear();
+        }
+      };
     },
     subscribeEvents: (listener) => {
       eventListeners.add(listener);

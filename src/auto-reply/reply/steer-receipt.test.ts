@@ -107,8 +107,8 @@ describe("steer receipts", () => {
     const observed = vi.fn();
     const run = makeRun({ messageId: undefined, onQueueDisposition: observed }, true);
     const order: string[] = [];
-    routeMocks.routeReply.mockImplementation(async (params: unknown) => {
-      order.push((params as { payload: { text: string } }).payload.text);
+    routeMocks.routeReply.mockImplementation(async (...args: unknown[]) => {
+      order.push((args[0] as { payload: { text: string } }).payload.text);
       return { ok: true, delivered: true, messageId: "901" };
     });
     const receipt = sendSteerReceipt({ followupRun: run, kind: "queued", sourceMessageId: "52" });

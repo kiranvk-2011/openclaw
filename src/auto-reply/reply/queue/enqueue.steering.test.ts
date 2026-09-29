@@ -171,6 +171,8 @@ describe("parked steering admission", () => {
       const active = createQueueTestRun({ prompt: "active delivery", messageId: "active" });
       const first = createQueueTestRun({ prompt: "first fallback", messageId: "first" });
       const newer = createQueueTestRun({ prompt: "newer fallback", messageId: "newer" });
+      const firstDisposition = vi.fn();
+      first.onQueueDisposition = firstDisposition;
       const activeEntered = createDeferred();
       const releaseActive = createDeferred();
       const runFollowup = async (run: FollowupRun) => {
@@ -198,6 +200,11 @@ describe("parked steering admission", () => {
           expect(queue?.items).toEqual([active, newer]);
           expect(queue?.summarySources.includes(first)).toBe(dropPolicy === "summarize");
         }
+        // drop:old reports the later eviction of the earlier fallback, which is what
+        // lets its receipt be followed up; summarize keeps the content, new keeps first.
+        expect(firstDisposition.mock.calls).toEqual(
+          dropPolicy === "old" ? [["queue-cap-old"]] : [],
+        );
       } finally {
         releaseActive.resolve();
       }
@@ -240,6 +247,20 @@ describe("parked steering admission", () => {
       // The disposition is read from the queue, so a repeated fallback reports it again.
       expect(firstReservation.fallback()).toBe("summarized");
       expect(middleReservation.fallback()).toBe("summarized");
+      // More overflow trims the elisions to the cap and evicts first's retained copy;
+      // the queue then reports a drop, which is why the summarized receipt warns that
+      // older summary entries can be trimmed.
+      for (const id of ["later-1", "later-2", "later-3"]) {
+        enqueueFollowupRun(
+          key,
+          createQueueTestRun({ prompt: id, messageId: id }),
+          settings,
+          "message-id",
+          runFollowup,
+        );
+      }
+      expect(queue?.summaryElisions.some((entry) => entry.sourceRefs.has(first))).toBe(true);
+      expect(firstReservation.fallback()).toBe("dropped");
     } finally {
       releaseActive.resolve();
     }

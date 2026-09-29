@@ -27,7 +27,7 @@ import {
 } from "./reply-run-registry.js";
 import { refreshReplyOperationTyping } from "./reply-run-typing.js";
 import { buildChannelSourceTurnId } from "./source-turn-id.js";
-import { sendSteerReceipt } from "./steer-receipt.js";
+import { armSteerReceiptEvictionNotice, sendSteerReceipt } from "./steer-receipt.js";
 import type { TypingSignaler } from "./typing-mode.js";
 
 type ActiveReplySteerParams = {
@@ -138,11 +138,19 @@ export async function runActiveReplySteer(
     }
     // Tell the sender where the message actually ended up: releasing the park
     // reapplies queue overflow, so a fallback can be summarized or dropped.
-    void sendSteerReceipt({
+    const receipt = sendSteerReceipt({
       followupRun,
       kind: outcome,
       sourceMessageId: params.sessionCtx.MessageSid,
     });
+    if (outcome === "queued" || outcome === "at-cap") {
+      // A later overflow can still evict a retained fallback; follow up if it does.
+      armSteerReceiptEvictionNotice({
+        followupRun,
+        sourceMessageId: params.sessionCtx.MessageSid,
+        after: receipt,
+      });
+    }
     await touchActiveSessionEntry();
     typing.cleanup();
     return "handled";

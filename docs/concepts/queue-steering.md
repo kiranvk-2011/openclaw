@@ -139,14 +139,20 @@ to reply to each such message in steer mode:
   taken the message into the running turn. For runtimes that steer at tool
   boundaries, this arrives when the current tool call finishes, not when the
   message is sent.
-- `⏳ Couldn't steer the current run; I'll answer this right after it.` when the
+- `⏳ Couldn't steer the current run; your message is queued behind it.` when the
   message falls back to a followup turn and the queue keeps it.
 - When the fallback overflows `messages.queue.cap`, the receipt follows the
-  `messages.queue.drop` outcome instead of promising an answer: a summary notice
-  for `summarize`, or a "dropped, please send it again" notice for `old` and `new`.
-  If other steered messages are still pending and the queue is over its cap, the
-  outcome is not final yet, and the receipt says the message may still be
-  summarized or dropped.
+  `messages.queue.drop` outcome: a queue-summary notice for `summarize`, or a
+  "dropped, please send it again" notice for `old` and `new`. If other steered
+  messages are still pending and the queue is over its cap, the outcome is not
+  final yet, and the receipt says the message may still be summarized or dropped.
+
+Fallback receipts describe where the message is at that moment and do not
+promise an answer, because the queue can still change. With `drop: old`, a later
+overflow can evict a message that was reported as queued; the sender then gets a
+second reply to the same message saying it was dropped and should be sent again.
+Summary entries are bounded too, so the summary notice says older entries can be
+trimmed; trimming a summary entry does not send a second notice.
 
 Receipts are standalone replies to the steered message. They are not added to
 the session transcript and do not count as that message's reply, so the queued

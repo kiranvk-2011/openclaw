@@ -3,26 +3,31 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
-import type { FollowupRun } from "./queue.js";
+import type { FollowupRun, ParkedSteerFallbackOutcome } from "./queue.js";
 import { extractShortModelName } from "./response-prefix-template.js";
 
 const routeReplyRuntimeLoader = createLazyImportLoader(() => import("./route-reply.runtime.js"));
 
 /**
  * What happened to a busy-time message in steer mode. Fallback kinds mirror the
- * queue's disposition, so a receipt never promises an answer the queue will not give.
+ * queue's disposition at the time of the receipt. Queue state can still change
+ * later (a later overflow can evict an older entry), so fallback wording states
+ * where the message is now and never promises an answer; "evicted" is the
+ * follow-up notice when a queued fallback is later dropped.
  */
-export type SteerReceiptKind = "steered" | "queued" | "at-cap" | "summarized" | "dropped";
+export type SteerReceiptKind = "steered" | ParkedSteerFallbackOutcome | "evicted";
 
 const STEER_RECEIPT_TEXT: Readonly<Record<SteerReceiptKind, string>> = {
   steered: "🦞🛞 Current run steered with your new message.",
-  queued: "⏳ Couldn't steer the current run; I'll answer this right after it.",
+  queued: "⏳ Couldn't steer the current run; your message is queued behind it.",
   "at-cap":
-    "⏳ Couldn't steer the current run and the queue is at its cap; this message may still be summarized or dropped.",
+    "⏳ Couldn't steer the current run; your message is queued behind it, but the queue is at its cap, so it may still be folded into a summary or dropped.",
   summarized:
-    "⏳ Couldn't steer the current run and the queue is full; this message goes into a summary that I'll answer after it.",
+    "⏳ Couldn't steer the current run and the queue is full; your message was folded into a queue summary behind it. If more messages overflow, older summary entries can be trimmed.",
   dropped:
     "⚠️ Couldn't steer the current run and the queue is full, so this message was dropped. Please send it again once the run finishes.",
+  evicted:
+    "⚠️ This message was dropped from the queue when newer messages overflowed it. Please send it again once the run finishes.",
 };
 
 /** Receipts are opt-in: without them steering stays silent, as it always has. */
@@ -103,4 +108,38 @@ export async function sendSteerReceipt(params: {
   } catch (error) {
     logVerbose(`queue: steer receipt (${kind}) failed: ${formatErrorMessage(error)}`);
   }
+}
+
+/**
+ * After a fallback receipt, tell the sender if the queue later evicts that message.
+ *
+ * `drop: old` reports the eviction through `onQueueDisposition("queue-cap-old")`;
+ * the existing observer keeps running first. The notice waits for the fallback
+ * receipt so it always arrives after it, and fires at most once.
+ */
+export function armSteerReceiptEvictionNotice(params: {
+  followupRun: FollowupRun;
+  sourceMessageId?: string;
+  after?: Promise<void>;
+}): void {
+  const { followupRun } = params;
+  if (!resolveSteerReceiptsEnabled(followupRun.run.config)) {
+    return;
+  }
+  const observe = followupRun.onQueueDisposition;
+  let notified = false;
+  followupRun.onQueueDisposition = (disposition) => {
+    observe?.(disposition);
+    if (notified || disposition !== "queue-cap-old") {
+      return;
+    }
+    notified = true;
+    void (params.after ?? Promise.resolve()).then(() =>
+      sendSteerReceipt({
+        followupRun,
+        kind: "evicted",
+        sourceMessageId: params.sourceMessageId,
+      }),
+    );
+  };
 }

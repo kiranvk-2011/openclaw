@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { FollowupRun } from "./queue.js";
-import { sendSteerReceipt } from "./steer-receipt.js";
+import { armSteerReceiptEvictionNotice, sendSteerReceipt } from "./steer-receipt.js";
 
 const STEERED = "🦞🛞 Current run steered with your new message.";
-const QUEUED = "⏳ Couldn't steer the current run; I'll answer this right after it.";
+const QUEUED = "⏳ Couldn't steer the current run; your message is queued behind it.";
+const EVICTED =
+  "⚠️ This message was dropped from the queue when newer messages overflowed it. Please send it again once the run finishes.";
 
 const routeMocks = vi.hoisted(() => ({
   routeReply: vi.fn(async () => ({ ok: true, delivered: true, messageId: "900" })),
@@ -90,14 +92,52 @@ describe("steer receipts", () => {
   });
 
   it.each([
-    ["at-cap", "may still be summarized or dropped"],
-    ["summarized", "goes into a summary"],
+    ["queued", "queued behind it"],
+    ["at-cap", "may still be folded into a summary or dropped"],
+    ["summarized", "older summary entries can be trimmed"],
     ["dropped", "was dropped. Please send it again"],
   ] as const)("does not promise an answer for a %s fallback", async (kind, fragment) => {
     await sendSteerReceipt({ followupRun: makeRun({}, true), kind });
     const call = routeMocks.routeReply.mock.calls[0] as unknown as [{ payload: { text: string } }];
     expect(call[0].payload.text).toContain(fragment);
-    expect(call[0].payload.text).not.toContain("I'll answer this right after it");
+    expect(call[0].payload.text).not.toMatch(/I'll answer/);
+  });
+
+  it("follows up once, after the fallback receipt, when a later overflow evicts the message", async () => {
+    const observed = vi.fn();
+    const run = makeRun({ messageId: undefined, onQueueDisposition: observed }, true);
+    const order: string[] = [];
+    routeMocks.routeReply.mockImplementation(async (params: unknown) => {
+      order.push((params as { payload: { text: string } }).payload.text);
+      return { ok: true, delivered: true, messageId: "901" };
+    });
+    const receipt = sendSteerReceipt({ followupRun: run, kind: "queued", sourceMessageId: "52" });
+    armSteerReceiptEvictionNotice({ followupRun: run, sourceMessageId: "52", after: receipt });
+    run.onQueueDisposition?.("queue-cap-old");
+    run.onQueueDisposition?.("queue-cap-old");
+    await receipt;
+    await vi.waitFor(() => expect(order).toEqual([QUEUED, EVICTED]));
+    expect(observed.mock.calls).toEqual([["queue-cap-old"], ["queue-cap-old"]]);
+    expect(routeMocks.routeReply).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        currentMessageId: "52",
+        payload: expect.objectContaining({ text: EVICTED, replyToId: "52" }),
+      }),
+    );
+    routeMocks.routeReply.mockReset();
+    routeMocks.routeReply.mockResolvedValue({ ok: true, delivered: true, messageId: "900" });
+  });
+
+  it("does not arm the eviction notice when receipts are off, and ignores other dispositions", async () => {
+    const off = makeRun({}, false);
+    armSteerReceiptEvictionNotice({ followupRun: off });
+    expect(off.onQueueDisposition).toBeUndefined();
+    const on = makeRun({}, true);
+    armSteerReceiptEvictionNotice({ followupRun: on });
+    on.onQueueDisposition?.("queue-cap");
+    on.onQueueDisposition?.("queue-cap-new");
+    await Promise.resolve();
+    expect(routeMocks.routeReply).not.toHaveBeenCalled();
   });
 
   it("stays silent for ambient room events and unroutable origins", async () => {

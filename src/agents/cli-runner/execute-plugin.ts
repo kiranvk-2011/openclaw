@@ -435,6 +435,8 @@ export async function executePluginOwnedProcess(params: {
   consumeStdout: (chunk: string) => void;
   onOutstandingWorkChange?: (active: boolean) => void;
   activeToolCount?: () => number;
+  compactionActive?: () => boolean;
+  onCompactionActiveChange?: (listener: () => void) => () => void;
   getActiveLoopbackAskUserDeadline?: () => number | undefined;
   onActiveLoopbackAskUserDeadlineChange?: (listener: () => void) => () => void;
   onNoOutputTimeout?: (error: FailoverError) => void;
@@ -488,8 +490,16 @@ export async function executePluginOwnedProcess(params: {
     observed: false,
     replayUnsafe: false,
   };
-  const reportOutstandingWork = () =>
-    params.onOutstandingWorkChange?.(outstanding.approvals > 0 || outstanding.background > 0);
+  const reportOutstandingWork = () => {
+    // Parsed tools are deliberately absent here: diagnostics tracks them itself via
+    // tool.execution.started, which makes activeWorkKind "tool_call" and takes the
+    // blocked-tool branch before the backend deadline is ever consulted. Counting
+    // them again would double-report the same work.
+    const toolWork = outstanding.approvals > 0 || outstanding.background > 0;
+    // Compaction joins the same report tool work already made, so diagnostics recovery
+    // holds a silent compaction open exactly as long as it holds a blocked tool call.
+    params.onOutstandingWorkChange?.(toolWork || (params.compactionActive?.() ?? false));
+  };
   const updatePendingApproval = (delta: number) => {
     outstanding.approvals = Math.max(0, outstanding.approvals + delta);
     reportOutstandingWork();
@@ -506,6 +516,7 @@ export async function executePluginOwnedProcess(params: {
       getActiveAskUserDeadline: params.getActiveLoopbackAskUserDeadline,
       activeToolCount: () => Math.max(params.activeToolCount?.() ?? 0, outstanding.approvals),
       backgroundTaskCount: () => outstanding.background,
+      compactionActive: () => params.compactionActive?.() ?? false,
       hasObservedActivity: () => outstanding.observed,
       hasReplayUnsafeActivity: () => outstanding.replayUnsafe,
       onNoOutputTimeout: (error) => {
@@ -522,6 +533,9 @@ export async function executePluginOwnedProcess(params: {
   );
   const stopAskUserDeadlineListener = params.onActiveLoopbackAskUserDeadlineChange?.(() =>
     watchdog.reset(),
+  );
+  const stopCompactionWorkListener = params.onCompactionActiveChange?.(() =>
+    reportOutstandingWork(),
   );
 
   let messageInjection: CliBackendMessageInjection | undefined;
@@ -700,6 +714,7 @@ export async function executePluginOwnedProcess(params: {
   } finally {
     watchdog.dispose();
     stopAskUserDeadlineListener?.();
+    stopCompactionWorkListener?.();
     params.onOutstandingWorkChange?.(false);
     // Permission callbacks can be retained by the plugin or its subprocess.
     // Closing the turn fences those capabilities before any outer cleanup runs.

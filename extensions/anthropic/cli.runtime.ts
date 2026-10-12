@@ -61,6 +61,8 @@ type ClaudeCliTurn = {
   submittedInputUuids: Set<string>;
   inputStarted: boolean;
   promptSubmitted: boolean;
+  /** Hook reruns carry no input UUID and may rewrite text; retain their native input owner. */
+  promptInputUuid: string;
   sawTerminalResult: boolean;
   foregroundTaskIds: Set<string>;
   foregroundBashToolUseIds: Set<string>;
@@ -73,8 +75,6 @@ type ClaudeCliTurn = {
     {
       text: string;
       started: ReturnType<typeof createDeferred<void>>;
-      /** Its UserPromptSubmit has been seen, so a later rerun is the admitted prompt again. */
-      contextSuppressed?: boolean;
     }
   >;
   /**
@@ -160,22 +160,16 @@ async function authorizeTool(
 }
 
 function isInjectedPrompt(turn: ClaudeCliTurn, prompt: unknown): boolean {
-  // Native reruns this hook for same-turn input; private context belongs to the admitted prompt.
-  if (typeof prompt !== "string") {
-    return false;
+  if (turn.promptInputUuid !== turn.inputUuid) {
+    return true;
   }
-  // Steered text may repeat the admitted prompt verbatim, and the payload carries
-  // no identity, so text alone cannot tell them apart. The admitted prompt submits
-  // before any input can be injected into its turn, so a pending injected input
-  // claims this submit — exactly one each. A later rerun of the admitted prompt
-  // finds every injected input already claimed and keeps its private context.
-  const injected = [...turn.injectedInputs.values()].find(
-    (input) => input.text === prompt && input.contextSuppressed !== true,
-  );
+  // Some native versions submit hooks before the started receipt. Match only the
+  // first pass; subsequent passes belong to that UUID even when text is rewritten.
+  const injected = [...turn.injectedInputs].find(([, input]) => input.text === prompt);
   if (!injected) {
     return false;
   }
-  injected.contextSuppressed = true;
+  turn.promptInputUuid = injected[0];
   return true;
 }
 
@@ -362,7 +356,8 @@ async function acceptMessage(session: ClaudeCliSession, message: Record<string, 
     const injectedUuid =
       typeof message.command_uuid === "string" ? message.command_uuid : undefined;
     const injected = injectedUuid ? turn.injectedInputs.get(injectedUuid) : undefined;
-    if (injected && message.state === "started") {
+    if (injected && injectedUuid && message.state === "started") {
+      turn.promptInputUuid = injectedUuid;
       injected.started.resolve();
       await emitHeldInterimResult(turn);
     } else if (
@@ -382,6 +377,9 @@ async function acceptMessage(session: ClaudeCliSession, message: Record<string, 
         injected.started.reject(new Error(`Claude CLI ${message.state} the injected input.`));
       }
       turn.injectedInputs.delete(injectedUuid);
+      if (turn.promptInputUuid === injectedUuid) {
+        turn.promptInputUuid = turn.inputUuid;
+      }
       const heldResult = turn.heldResult;
       if (
         heldResult &&
@@ -571,6 +569,7 @@ export async function* executeClaudeCli(
     submittedInputUuids: new Set([inputUuid]),
     inputStarted: false,
     promptSubmitted: false,
+    promptInputUuid: inputUuid,
     sawTerminalResult: false,
     foregroundTaskIds: new Set(),
     foregroundBashToolUseIds: new Set(),

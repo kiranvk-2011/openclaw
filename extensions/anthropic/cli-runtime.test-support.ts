@@ -31,6 +31,7 @@ let lateDecision;
 let pendingInputUuid;
 let firstInputUuid;
 let injectedContext;
+let injectedRerunContext;
 const priorResponses = {};
 let credentialProof;
 let shutdownDescendant;
@@ -72,7 +73,7 @@ const nativeToolName = scenario === "user-question" ? "AskUserQuestion" : scenar
 const nativeToolInput = scenario === "user-question" ? questionInput : firstSeenBackground ? { command: "synthetic long command", run_in_background: explicitBackground } : { file_path: "fixture.txt" };
 const result = (detail = {}) => send({
   type: "result", subtype: "success", is_error: false,
-  result: JSON.stringify({ pid: process.pid, turn, user, privateContext, initialize, argv: process.argv.slice(2), ...detail }),
+  result: JSON.stringify({ pid: process.pid, turn, user, privateContext, injectedRerunContext, initialize, argv: process.argv.slice(2), ...detail }),
   session_id: "fixture-session",
   ...(detail.injectedContext ? { user_message_uuid: pendingInputUuid } : {}),
   ...((!replayReceipts || scenario === "background-bash-overlap") && detail.finalBackgroundAnswer ? {
@@ -299,10 +300,28 @@ for await (const line of createInterface({ input: process.stdin })) {
     const { request_id: id, response } = message.response;
     if (id === "admitted-context") {
       privateContext = response.hookSpecificOutput?.additionalContext;
+      if (scenario.startsWith("steer-hook-")) {
+        request("admitted-rerun", { subtype: "hook_callback", callback_id: hooks.UserPromptSubmit[0].hookCallbackIds[0],
+          input: { hook_event_name: "UserPromptSubmit", prompt: user + " rewritten" } });
+        continue;
+      }
       writeFileSync("turn.ready", "ready");
       sendReceipt(path.join(process.cwd(), "turn.ready"), "ready");
-    } else if (id === "injected-context") {
-      injectedContext = response;
+    } else if (id === "admitted-rerun") {
+      assert.equal(response.hookSpecificOutput?.additionalContext, privateContext);
+      writeFileSync("turn.ready", "ready");
+      sendReceipt(path.join(process.cwd(), "turn.ready"), "ready");
+    } else if (id === "injected-context" || id === "injected-rerun") {
+      if (id === "injected-context") {
+        injectedContext = response;
+        if (scenario.startsWith("steer-hook-")) {
+          request("injected-rerun", { subtype: "hook_callback", callback_id: hooks.UserPromptSubmit[0].hookCallbackIds[0],
+            input: { hook_event_name: "UserPromptSubmit", prompt: scenario === "steer-hook-rewrite" ? user + " rewritten" : user } });
+          continue;
+        }
+      } else {
+        injectedRerunContext = response;
+      }
       send({ type: "command_lifecycle", state: "started", command_uuid: pendingInputUuid });
       if (scenario === "steer-after-result") {
         send({ type: "system", subtype: "init", capabilities: ["msg_lifecycle_v1"] });

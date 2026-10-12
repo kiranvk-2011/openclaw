@@ -643,6 +643,8 @@ describe("Claude native stdio boundary", () => {
 
   it.each([
     { scenario: "steer-merged", results: 1 },
+    { scenario: "steer-hook-repeat", results: 1 },
+    { scenario: "steer-hook-rewrite", results: 1 },
     { scenario: "steer-after-result", results: 2 },
     { scenario: "steer-idle-trailer", results: 1 },
     { scenario: "steer-notification-replay", results: 2 },
@@ -689,6 +691,9 @@ describe("Claude native stdio boundary", () => {
       }
       expect(detail.privateContext).toBe("current private context");
       expect(detail.injectedContext).toEqual({});
+      expect(detail.injectedRerunContext).toEqual(
+        scenario.startsWith("steer-hook-") ? {} : undefined,
+      );
       expect(injection!.isAvailable()).toBe(false);
     },
   );
@@ -725,8 +730,6 @@ describe("Claude native stdio boundary", () => {
     const running = collect(context);
     await receipts.waitFor(path.join(context.cwd, "turn.ready"), "ready");
     expect(injection?.isAvailable()).toBe(true);
-    // Text alone cannot tell the two apart; the admitted prompt already had its
-    // submit, so this one is the injected input and gets no private context.
     await injection!.queueMessage(context.prompt, async (submit) => submit());
     const records = await running;
 

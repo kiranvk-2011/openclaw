@@ -3,6 +3,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  clearRuntimeConfigSnapshot,
+  setRuntimeConfigSnapshot,
+} from "../config/runtime-snapshot.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { onAgentEvent } from "../infra/agent-events.js";
 import type { RunExit } from "../process/supervisor/types.js";
@@ -126,6 +130,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  clearRuntimeConfigSnapshot();
   await fs.rm(scenarioRoot, { recursive: true, force: true });
 });
 
@@ -225,6 +230,7 @@ async function runOuter(options: OuterRunOptions = {}) {
   harness.wholeTurnRuns += 1;
   const runId = "run-cli-fault-e2e";
   const config = fallbackConfig(options.fallbacks);
+  setRuntimeConfigSnapshot(config);
   return withTestRunAdmission(
     {
       admittedRunContext: createTestAdmittedRunContext(runId),

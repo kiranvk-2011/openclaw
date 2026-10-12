@@ -1,7 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { buildAnthropicCliBackend } from "../../../extensions/anthropic/api.js";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { runActiveReplySteer } from "../../auto-reply/reply/agent-runner-steer-adoption.js";
 import { handleSteerCommand } from "../../auto-reply/reply/commands-steer.js";
@@ -20,6 +19,10 @@ import {
 } from "../../auto-reply/reply/reply-tool-authority.js";
 import { createMockTypingController } from "../../auto-reply/reply/test-helpers.js";
 import { createTypingSignaler } from "../../auto-reply/reply/typing-mode.js";
+import {
+  clearRuntimeConfigSnapshot,
+  setRuntimeConfigSnapshot,
+} from "../../config/runtime-snapshot.js";
 import { resolveSessionStorePathCore } from "../../config/sessions/paths.js";
 import {
   updateSessionEntry,
@@ -27,13 +30,19 @@ import {
 } from "../../config/sessions/session-accessor.js";
 import * as sessionReads from "../../config/sessions/session-entry-read-runtime.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import type { CliBackendPlugin } from "../../plugins/cli-backend.types.js";
 import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
 import { readTranscriptMessages } from "../../sessions/user-turn-transcript.test-support.js";
+import { loadBundledPluginFacade } from "../../test-utils/bundled-plugin-public-surface.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { bindWorkerToolPreparation } from "../harness/host-private-capabilities.js";
 import { bindPreparedToolAuthority } from "../harness/tool-authority-preparation.js";
 import { executePluginOwnedProcess } from "./execute-plugin.js";
 import { closePluginTestAdmissions, createExecution } from "./execute-plugin.test-support.js";
+
+const { buildAnthropicCliBackend } = await loadBundledPluginFacade<{
+  buildAnthropicCliBackend: () => CliBackendPlugin;
+}>({ pluginId: "anthropic", artifactBasename: "api.js" });
 
 // One external process proves stdin delivery through the real public provider adapter.
 // Native scheduling variants belong to the Anthropic transport's protocol matrix.
@@ -71,6 +80,7 @@ for await (const line of createInterface({ input: process.stdin })) {
 
 afterEach(() => {
   closePluginTestAdmissions();
+  clearRuntimeConfigSnapshot();
   vi.restoreAllMocks();
 });
 
@@ -84,6 +94,8 @@ it("steers configured, session and explicit inputs through current authority int
       agents: { defaults: { sandbox: { mode: "all" } }, entries: { main: {} } },
       tools: { sandbox: { tools: { deny: ["exec"] } }, exec: { security: "full", ask: "off" } },
     };
+    // Storage consumes the runtime-prepared config, including in a fresh Bun worker.
+    setRuntimeConfigSnapshot(config);
     const policyScope = { agentId: "main", sessionKey: policyKey };
     await upsertSessionEntryCore(policyScope, {
       sessionId: "policy",
@@ -175,9 +187,15 @@ it("steers configured, session and explicit inputs through current authority int
       if (!target) {
         throw new Error("Claude native transport has no registry input sink");
       }
+      const guestFingerprint = await resolveFollowupRunToolAuthorityFingerprintAsync({
+        ...followupRun,
+        toolsAllow: ["read"],
+        run: { ...followupRun.run, senderId: "guest", senderIsOwner: false },
+      });
+      expect(guestFingerprint).not.toBe(fingerprint);
       const mismatch = await beginReplyMessageInjectionTarget(target, "different principal", {
         isInboundUserMessage: true,
-        toolAuthorityFingerprint: "different-principal-authority",
+        toolAuthorityFingerprint: guestFingerprint,
       });
       await expect(mismatch.outcome).resolves.toMatchObject({
         status: "rejected",

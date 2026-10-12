@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { formatErrorMessage } from "@openclaw/normalization-core/error-coercion";
 import { finiteSecondsToTimerSafeMilliseconds } from "@openclaw/normalization-core/number-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
@@ -9,7 +10,6 @@ import { createRuntimeConfigReader } from "../../config/runtime-snapshot.js";
 import { resolvePersistedSessionStoreOwnerForKey } from "../../config/sessions/session-store-owner.js";
 import { resolveSessionStoreKey } from "../../gateway/session-store-key.js";
 import { shouldResumeParentSubagent } from "../../gateway/session-subagent-resume.js";
-import { formatErrorMessage } from "../../infra/errors.js";
 import {
   logSessionOwnershipLookupFailure,
   lookupFailedDenialMessage,
@@ -78,7 +78,11 @@ import {
   notifySessionsSendSession,
   resolveConfiguredAgentMainSessionKey,
 } from "./sessions-send-tool.delivery.js";
-import * as input from "./sessions-send-tool.input.js";
+import {
+  readSessionsSendMessage,
+  readSessionsSendMode,
+  readSessionsSendTimeout,
+} from "./sessions-send-tool.input.js";
 import { SessionsSendToolSchema, SessionsSendOutputSchema } from "./sessions-send-tool.schema.js";
 import type { SessionsSendToolOptions } from "./sessions-send-tool.types.js";
 
@@ -99,14 +103,14 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
       const promptedAt = Date.now();
       const gatewayCall = opts?.callGateway ?? callAgentToolGatewayRequest;
       const sendGatewayCall = opts?.callGateway ?? callSessionsSendGateway;
-      const message = input.readSessionsSendMessage(params);
-      const mode = input.readSessionsSendMode(params);
+      const message = readSessionsSendMessage(params);
+      const mode = readSessionsSendMode(params);
       const resumeCaller =
         mode === undefined || mode === "resume" ? captureSessionsSendResumeCaller() : undefined;
       if (mode === "resume" && !resumeCaller) {
         return sendFailure("forbidden", "Task resume requires an admitted parent tool caller.");
       }
-      const timeoutSeconds = input.readSessionsSendTimeout(params, mode);
+      const timeoutSeconds = readSessionsSendTimeout(params, mode);
       const {
         cfg,
         mainKey,

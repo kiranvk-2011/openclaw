@@ -5,18 +5,21 @@ import {
   validateSessionsBranchesSwitchParams,
   validateSessionsForkParams,
   validateSessionsRewindParams,
-  type SessionsBranchesListParams,
   type SessionsBranchesSwitchParams,
   type SessionsRewindParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import type { ErrorCode } from "../../../packages/gateway-protocol/src/schema/error-codes.js";
 import { clearSessionLifecycleQueues } from "../../auto-reply/reply/queue/cleanup.js";
-import {
-  listSessionBranches,
-  type SessionBranchSwitchMutationResult,
-  type SessionMessageCutMutationResult,
+import type {
+  SessionBranchSwitchMutationResult,
+  SessionMessageCutMutationResult,
 } from "../../config/sessions/session-accessor.js";
 import { mutateSessionAtMessageWithPreconditions } from "../../config/sessions/session-accessor.sqlite-message-cut.js";
+import {
+  captureSessionActorStorageOwner,
+  getSessionActorStorageBinding,
+  runWithSessionActorStorage,
+} from "../../config/sessions/session-actor-storage-binding.js";
 import { captureSessionEntryMetadataRead } from "../../config/sessions/session-entry-source-authority.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { isIncognitoSessionKey } from "../../routing/session-key.js";
@@ -27,6 +30,7 @@ import {
   isCompetingSessionWorkAdmissionActive,
   runExclusiveSessionLifecycleMutation,
 } from "../../sessions/session-lifecycle-admission.js";
+import { sessionChanges } from "../../sessions/session-row-changes.js";
 import {
   captureSessionUpstreamLinkReadSource,
   prepareSessionUpstreamLink,
@@ -37,27 +41,32 @@ import { getSessionRepositoryWorkspaceStore } from "../../state/session-reposito
 import { authorizeGatewaySessionCreation, resolveCreatorSandbox } from "../operator-role-policy.js";
 import { buildDashboardSessionKey } from "../session-create-key.js";
 import { resolveOperatorSessionCreation } from "../session-creation-provenance.js";
+import { withPreparedSessionEventRow } from "../session-event-prepared-row.js";
 import {
   resolveRequestedSessionAgentId as resolveRequestedGlobalAgentId,
   tryResolveSessionCompatibilityOwnerAgentId,
 } from "../session-request-agent.js";
+import { getSessionRowProjection } from "../session-row-projection-access.js";
 import { SessionMutationAuthorizationChangedError } from "../session-sharing.js";
 import { withGatewaySessionEntryReadOnly } from "../session-utils-read-lifetime.js";
 import type { loadGatewaySessionEntryReadOnly } from "../session-utils-store.js";
 import { getWorkerInferenceSessionControl } from "../worker-environments/inference-control-internal.js";
-import { resolveSessionWorkerPlacementMutationError } from "../worker-environments/session-placement-lifecycle.js";
+import {
+  readSessionWorkerPlacementAsync,
+  resolveSessionWorkerPlacementMutationError,
+} from "../worker-environments/session-placement-lifecycle.js";
 import { forkSessionRepositoryWorkspace } from "../worker-environments/session-repository-checkpoints.js";
 import { resolveVisibleActiveSessionRunState } from "./session-active-runs.js";
 import { emitSessionsChanged } from "./session-change-event.js";
 import { prepareSessionForkFilesystemRoot } from "./session-create-root.js";
-import { resolveEditorMediaAttachments } from "./session-rewind-media.js";
+import { resolveEditorMediaAttachments } from "./session-rewind-editor-media.js";
 import { waitForTerminalSessionRunSettlement } from "./session-run-settlement.js";
-import { retainSessionScopedRead } from "./session-scoped-read.js";
+import { listSessionBranchesForGateway } from "./sessions-branches-list.js";
 import {
   createUpstreamForkCurrentGuard,
   resolveUpstreamForkHarness,
 } from "./sessions-fork-runtime-guard.js";
-import { loadAccessorSessionEntryForGatewayTarget } from "./sessions-shared.js";
+import { loadAccessorSessionEntryForGatewayTarget, sessionLog } from "./sessions-shared.js";
 import type { GatewayRequestHandlerOptions, GatewayRequestHandlers } from "./types.js";
 import { defineValidatedGatewayHandler } from "./validation.js";
 
@@ -74,7 +83,7 @@ export const sessionRewindHandlers: GatewayRequestHandlers = {
   "sessions.branches.list": defineValidatedGatewayHandler(
     "sessions.branches.list",
     validateSessionsBranchesListParams,
-    listBranches,
+    listSessionBranchesForGateway,
   ),
   "sessions.branches.switch": defineValidatedGatewayHandler(
     "sessions.branches.switch",
@@ -92,77 +101,6 @@ export const sessionRewindHandlers: GatewayRequestHandlers = {
     (options) => mutateSessionAtMessage(options, "fork"),
   ),
 };
-
-async function listBranches(
-  options: Omit<GatewayRequestHandlerOptions, "params"> & { params: SessionsBranchesListParams },
-): Promise<void> {
-  const { params, respond, context } = options;
-  const sessionKey = params.sessionKey.trim();
-  const cfg = context.getRuntimeConfig();
-  const requestedAgent = resolveRequestedGlobalAgentId(cfg, sessionKey, params.agentId);
-  if (!requestedAgent.ok) {
-    respond(false, undefined, requestedAgent.error);
-    return;
-  }
-  // Branches depend on transcript/lifecycle state, not a label or activity update during I/O.
-  const read = retainSessionScopedRead(options, sessionKey, requestedAgent.agentId, {
-    allowMetadataChanges: true,
-  });
-  try {
-    await withGatewaySessionEntryReadOnly(
-      {
-        key: sessionKey,
-        cfg,
-        agentId: requestedAgent.agentId,
-        excludeInternalEffects: true,
-        projection: "list",
-      },
-      async (current, assertCurrent) => {
-        const upstreamLink = current.entry?.sessionId
-          ? await prepareSessionUpstreamLink(
-              captureSessionUpstreamLinkReadSource(),
-              current.canonicalKey,
-              current.agentId,
-            )
-          : undefined;
-        assertCurrent();
-        read?.assertCurrent();
-        if (!current.entry?.sessionId || upstreamLink) {
-          // Fresh and upstream-owned sessions have no local branches. Only the
-          // mutating siblings treat those states as errors.
-          respond(true, { branches: [] }, undefined);
-          return;
-        }
-        const result = await listSessionBranches({
-          agentId: current.agentId,
-          sessionKey: current.canonicalKey,
-          sessionStoreKey: current.canonicalKey,
-          storePath: current.storePath,
-        });
-        assertCurrent();
-        read?.assertCurrent();
-        if (result.status !== "ok") {
-          respond(
-            false,
-            undefined,
-            errorShape(
-              result.status === "failed" ? ErrorCodes.UNAVAILABLE : ErrorCodes.INVALID_REQUEST,
-              {
-                "missing-session": "session not found",
-                "unsupported-storage": "session transcript storage does not support branch listing",
-                failed: "failed to list session branches",
-              }[result.status],
-            ),
-          );
-          return;
-        }
-        respond(true, { branches: result.branches }, undefined);
-      },
-    );
-  } finally {
-    read?.release();
-  }
-}
 
 async function mutateSessionAtMessage(
   options: Omit<GatewayRequestHandlerOptions, "params"> & {
@@ -208,6 +146,11 @@ async function mutatePreparedSessionAtMessage({
   assertSourceCurrent: () => void;
 }): Promise<void> {
   const { params, respond, context, client } = options;
+  const memory = getSessionActorStorageBinding({
+    sessionKey: initial.canonicalKey,
+    agentId: initial.agentId,
+    storePath: initial.storePath,
+  });
   const reject = (message: string, code: ErrorCode = ErrorCodes.INVALID_REQUEST) =>
     respond(false, undefined, errorShape(code, message));
   const { sessionMutationCommitGuard, sessionMutationAuthorization } = options;
@@ -319,11 +262,13 @@ async function mutatePreparedSessionAtMessage({
       }
       const current = await loadCurrent();
       if (
-        current.entry?.sessionId !== initialSessionId ||
-        current.entry.lifecycleRevision !== initialLifecycleRevision ||
-        current.storePath !== initial.storePath ||
-        current.canonicalKey !== initial.canonicalKey ||
-        current.agentId !== initial.agentId
+        !current.entry ||
+        (!memory &&
+          (current.entry?.sessionId !== initialSessionId ||
+            current.entry.lifecycleRevision !== initialLifecycleRevision ||
+            current.storePath !== initial.storePath ||
+            current.canonicalKey !== initial.canonicalKey ||
+            current.agentId !== initial.agentId))
       ) {
         reject(`Session ${sessionKey} changed; retry ${action}.`);
         return;
@@ -340,6 +285,7 @@ async function mutatePreparedSessionAtMessage({
         reject(message);
         return;
       }
+      await readSessionWorkerPlacementAsync({ context, sessionId: current.entry.sessionId });
       const placementError = resolveSessionWorkerPlacementMutationError({
         action,
         context,
@@ -485,7 +431,11 @@ async function mutatePreparedSessionAtMessage({
         sessionKey: current.canonicalKey,
         storePath: current.storePath,
       });
+      const memoryOwner = memory && captureSessionActorStorageOwner(memory);
       const readRepositoryEntry = (key: string) => {
+        if (memory) {
+          return memoryOwner?.owner?.readSession(key, memory.authority)?.entry;
+        }
         if (repositoryEntrySource) {
           if (key === current.canonicalKey) {
             return repositoryEntrySource.readCurrent();
@@ -580,7 +530,7 @@ async function mutatePreparedSessionAtMessage({
         result = await mutateSessionAtMessageWithPreconditions(
           action === "fork" ? forkParams : { ...mutationParams, entryId },
           action,
-          expectedState,
+          memory ? undefined : expectedState,
           {
             sourceRepositoryWorkspaceId: forkRepository?.sourceWorkspaceId,
             assertUpstreamCurrent: assertLocalUpstreamCurrent,
@@ -636,49 +586,84 @@ async function mutatePreparedSessionAtMessage({
         );
         return;
       }
-      const editorAttachments =
-        action === "switch"
-          ? []
-          : [
-              ...("editorAttachments" in result ? (result.editorAttachments ?? []) : []),
-              ...(await resolveEditorMediaAttachments(
-                "editorMediaRefs" in result ? result.editorMediaRefs : undefined,
-              )),
-            ];
-      if (action !== "fork") {
-        clearSessionLifecycleQueues({
-          keys: lifecycleIdentities,
-          agentId: current.agentId,
-          sessionKey: current.canonicalKey,
-          sessionId: initialSessionId,
-          // History is committed; settling its original queues must finish after revocation.
-          assertCurrent: () => {},
-        });
+      const committedResult = result;
+      const complete = async () => {
+        const editorAttachments =
+          action === "switch"
+            ? []
+            : [
+                ...("editorAttachments" in committedResult
+                  ? (committedResult.editorAttachments ?? [])
+                  : []),
+                ...(await resolveEditorMediaAttachments(
+                  "editorMediaRefs" in committedResult
+                    ? committedResult.editorMediaRefs
+                    : undefined,
+                )),
+              ];
+        if (action !== "fork") {
+          clearSessionLifecycleQueues({
+            keys: lifecycleIdentities,
+            agentId: current.agentId,
+            sessionKey: current.canonicalKey,
+            sessionId: initialSessionId,
+            // History is committed; settling its original queues must finish after revocation.
+            assertCurrent: () => {},
+          });
+        } else {
+          await recordSessionCreated(cfg, {
+            sessionKey: committedResult.key,
+            agentId: current.agentId,
+            entry: committedResult.entry,
+          });
+        }
+        respond(
+          true,
+          action === "switch"
+            ? {}
+            : {
+                ...(action === "fork" ? { sessionKey: committedResult.key } : {}),
+                ...("editorText" in committedResult && committedResult.editorText
+                  ? { editorText: committedResult.editorText }
+                  : {}),
+                ...(editorAttachments.length > 0 ? { editorAttachments } : {}),
+              },
+          undefined,
+        );
+        const payload = {
+          sessionKey: action === "fork" ? committedResult.key : current.canonicalKey,
+          sessionId: committedResult.entry.sessionId,
+          agentId: requestedAgentId,
+          reason: action === "switch" ? "branch-switch" : action,
+        };
+        if (memory) {
+          sessionChanges.emit({ sessionKey: payload.sessionKey, agentId: payload.agentId });
+          try {
+            await withPreparedSessionEventRow(
+              getSessionRowProjection(context),
+              payload.sessionKey,
+              payload.agentId,
+              (sessionRows) =>
+                emitSessionsChanged(context, payload, { preparedPublication: true, sessionRows }),
+            );
+          } catch (error) {
+            sessionLog.warn(`Session change preparation failed: ${String(error)}`);
+            emitSessionsChanged(context, payload, { preparedPublication: true });
+          }
+        } else {
+          emitSessionsChanged(context, payload);
+        }
+      };
+      if (memory) {
+        const actor = await memory.actor.storage!.acquire(committedResult.key);
+        try {
+          await runWithSessionActorStorage({ ...memory, actor }, complete);
+        } finally {
+          await actor.release();
+        }
       } else {
-        await recordSessionCreated(cfg, {
-          sessionKey: result.key,
-          agentId: current.agentId,
-          entry: result.entry,
-        });
+        await complete();
       }
-      respond(
-        true,
-        action === "switch"
-          ? {}
-          : {
-              ...(action === "fork" ? { sessionKey: result.key } : {}),
-              ...("editorText" in result && result.editorText
-                ? { editorText: result.editorText }
-                : {}),
-              ...(editorAttachments.length > 0 ? { editorAttachments } : {}),
-            },
-        undefined,
-      );
-      emitSessionsChanged(context, {
-        sessionKey: action === "fork" ? result.key : current.canonicalKey,
-        agentId: requestedAgentId,
-        reason: action === "switch" ? "branch-switch" : action,
-      });
     },
   });
 }

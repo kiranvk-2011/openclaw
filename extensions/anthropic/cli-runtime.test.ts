@@ -22,7 +22,7 @@ import {
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildAnthropicCliBackend } from "./cli-backend.js";
 import type { ClaudeCliSecretInput } from "./cli-process.js";
-import { CLAUDE_PROTOCOL_FIXTURE } from "./cli-runtime.test-support.js";
+import { CLAUDE_PROTOCOL_FIXTURE, resultDetail } from "./cli-runtime.test-support.js";
 import { executeClaudeCli } from "./cli.runtime.js";
 
 const roots: string[] = [];
@@ -128,14 +128,6 @@ async function collect(context: CliBackendExecuteContext) {
     records.push(record);
   }
   return records;
-}
-
-function resultDetail(records: Record<string, unknown>[]): Record<string, unknown> {
-  const result = records.findLast((record) => record.type === "result");
-  expect(result).toEqual(
-    expect.objectContaining({ subtype: "success", result: expect.any(String) }),
-  );
-  return JSON.parse(String(result?.result)) as Record<string, unknown>;
 }
 
 async function fixtureReadyBeforeSettlement(
@@ -633,6 +625,8 @@ describe("Claude native stdio boundary", () => {
       });
       expect(records.filter((record) => record.type === "result")).toHaveLength(1);
       expect(records.some((record) => record.type === "assistant")).toBe(false);
+      expect(records.some((record) => record.type === "stream_event")).toBe(false);
+      expect(records.some((record) => record.user_message_uuid === "prior-turn")).toBe(false);
       const detail = resultDetail(records);
       expect(detail).toMatchObject({ user: prompt, matchedInputUuid: expect.any(String) });
       if (prompt === "second input") {
@@ -667,15 +661,20 @@ describe("Claude native stdio boundary", () => {
       const running = collect(context);
       await receipts.waitFor(path.join(context.cwd, "turn.ready"), "ready");
       expect(injection?.isAvailable()).toBe(true);
-      const assertCurrent = vi.fn();
+      const withCurrent = vi.fn(async (submit: () => void) => submit());
       const notificationReplay = scenario.includes("notification-replay");
       const input = notificationReplay
         ? "<task-notification><task-id>background-agent</task-id></task-notification>"
         : "steering input";
-      await injection!.queueMessage(input, assertCurrent);
-      expect(assertCurrent).toHaveBeenCalledOnce();
+      await injection!.queueMessage(input, withCurrent);
+      expect(withCurrent).toHaveBeenCalledOnce();
       const records = await running;
       const resultRecords = records.filter((record) => record.type === "result");
+      const tagged = records.filter((record) => record.user_message_uuid !== undefined);
+      expect(tagged.map((record) => record.type)).toEqual(
+        expect.arrayContaining(["stream_event", "assistant", "result"]),
+      );
+      expect(new Set(tagged.map((record) => record.user_message_uuid)).size).toBe(1);
       expect(resultRecords).toHaveLength(results);
       // The host needs one terminal result; answers before the injected turn stay interim.
       expect(resultRecords.map((record) => record.openclaw_interim_result === true)).toEqual([
@@ -706,9 +705,9 @@ describe("Claude native stdio boundary", () => {
     try {
       expect((await iterator.next()).value).toMatchObject({ type: "system", subtype: "init" });
       expect(injection?.isAvailable()).toBe(false);
-      await expect(injection!.queueMessage(context.prompt, () => {})).rejects.toThrow(
-        "The Claude CLI turn cannot accept more input.",
-      );
+      await expect(
+        injection!.queueMessage(context.prompt, async (submit) => submit()),
+      ).rejects.toThrow("The Claude CLI turn cannot accept more input.");
     } finally {
       await iterator.return?.();
     }
@@ -728,7 +727,7 @@ describe("Claude native stdio boundary", () => {
     expect(injection?.isAvailable()).toBe(true);
     // Text alone cannot tell the two apart; the admitted prompt already had its
     // submit, so this one is the injected input and gets no private context.
-    await injection!.queueMessage(context.prompt, vi.fn());
+    await injection!.queueMessage(context.prompt, async (submit) => submit());
     const records = await running;
 
     const detail = resultDetail(records);
@@ -749,7 +748,9 @@ describe("Claude native stdio boundary", () => {
     void running.catch(() => {});
     await receipts.waitFor(path.join(context.cwd, "turn.ready"), "ready");
     expect(injection?.isAvailable()).toBe(true);
-    await expect(injection!.queueMessage("lost input", () => {})).rejects.toThrow();
+    await expect(
+      injection!.queueMessage("lost input", async (submit) => submit()),
+    ).rejects.toThrow();
     await expect(running).rejects.toThrow();
   });
 
@@ -766,7 +767,7 @@ describe("Claude native stdio boundary", () => {
       const running = collect(context);
       await receipts.waitFor(path.join(context.cwd, "turn.ready"), "ready");
       expect(injection?.isAvailable()).toBe(true);
-      const receipt = injection!.queueMessage("terminal input", () => {});
+      const receipt = injection!.queueMessage("terminal input", async (submit) => submit());
       if (state === "completed") {
         await expect(receipt).resolves.toBeUndefined();
       } else {
@@ -793,7 +794,7 @@ describe("Claude native stdio boundary", () => {
     await receipts.waitFor(path.join(context.cwd, "turn.ready"), "ready");
     expect(injection?.isAvailable()).toBe(true);
     await expect(
-      injection!.queueMessage("revoked input", () => {
+      injection!.queueMessage("revoked input", async () => {
         throw new Error("revoked");
       }),
     ).rejects.toThrow("revoked");

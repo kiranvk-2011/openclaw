@@ -1,12 +1,73 @@
+import {
+  MessageInjectionAcceptedUnconfirmedError,
+  withMessageInjectionAdmission,
+} from "../../auto-reply/reply/message-injection-authority.js";
 import type {
+  ReplyBackendMessageInjectionV2,
   ReplyBackendQueueMessageOptions,
   ReplyBackendQueueMessageResult,
 } from "../../auto-reply/reply/reply-run-registry.contracts.js";
+import type { SessionSourceAssertion } from "../../config/sessions/session-source-authority.js";
 import { formatErrorMessage, toErrorObject } from "../../infra/errors.js";
+import type { CliBackendMessageInjection } from "../../plugins/cli-backend.types.js";
+import { runWithAgentToolSourceExecutionScope } from "../agent-tool-source-execution-guard.js";
 import { cliBackendLog } from "./log.js";
 
+/** One host adapter owns final input admission and accepted transcript custody. */
+export function createSteeredCliMessageInjection(params: {
+  getInjection: () => CliBackendMessageInjection | undefined;
+  signal: AbortSignal;
+  assertCurrent: SessionSourceAssertion;
+  cwd: string;
+}): ReplyBackendMessageInjectionV2 {
+  const queueMessage = async (
+    text: string,
+    options: ReplyBackendQueueMessageOptions | undefined,
+    assertInjectionCurrent: () => void,
+    prepareCurrent?: () => Promise<void>,
+  ) => {
+    const injection = params.getInjection();
+    if (!injection) {
+      throw new Error("CLI plugin runtime does not accept input during its turn.");
+    }
+    return await queueSteeredCliUserTurn(
+      () =>
+        injection.queueMessage(text, async (submit) => {
+          let submitted = false;
+          try {
+            await runWithAgentToolSourceExecutionScope(params.assertCurrent, async () => {
+              await withMessageInjectionAdmission(prepareCurrent, () => {
+                // The same worker-backed admission owns source checks and native stdin.
+                assertInjectionCurrent();
+                params.assertCurrent();
+                submit();
+                submitted = true;
+              });
+            });
+          } catch (cause) {
+            // Outer source cleanup can fail after native owns input, just like admission cleanup.
+            if (submitted) {
+              throw new MessageInjectionAcceptedUnconfirmedError({ cause });
+            }
+            throw cause;
+          }
+        }),
+      options,
+      params.cwd,
+    );
+  };
+  return {
+    version: 2,
+    isAvailable: () => !params.signal.aborted && params.getInjection()?.isAvailable() === true,
+    queueMessage: (text, options, assertInjectionCurrent) =>
+      queueMessage(text, options, assertInjectionCurrent),
+    queueMessageAsync: (text, options, preparation) =>
+      queueMessage(text, options, preparation.assertCurrent, preparation.prepareCurrent),
+  };
+}
+
 /** Native acceptance owns replay safety; transcript settlement releases input custody. */
-export async function queueSteeredCliUserTurn(
+async function queueSteeredCliUserTurn(
   inject: () => Promise<void>,
   options: ReplyBackendQueueMessageOptions | undefined,
   cwd: string,

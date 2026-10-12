@@ -12,11 +12,11 @@ import { type EditorId, openEditor } from "../../../lib/editor-links.ts";
 import { formatUiError } from "../../../lib/format-error.ts";
 import { registerEnglishCatalog, t } from "../../../lib/reactive/i18n.ts";
 import type { SolidBridgeElement } from "../../../lit/solid-bridge.ts";
-import { defineSolidBridge, LitContent } from "../../../lit/solid-bridge.ts";
+import { defineSolidBridge } from "../../../lit/solid-bridge.ts";
 import { createSolidRenderLifecycle } from "../solid-render-lifecycle.ts";
 import { AttachmentDownloadController } from "./chat-attachment-download-controller.ts";
 import { FileCopyController } from "./chat-file-copy-controller.ts";
-import { captureFileEditorDraft, restoreFileDraft, setFileDraft } from "./chat-file-drafts.ts";
+import { captureFileEditorDraft, readFileDraft, setFileDraft } from "./chat-file-drafts.ts";
 import { FileHtmlPreviewController } from "./chat-html-preview.ts";
 import { releaseChatMediaResourceSubscriber } from "./chat-message-media.ts";
 import type {
@@ -30,13 +30,14 @@ import {
   buildRawContent,
   handleSidebarClick,
   handleSidebarKeydown,
-  renderSidebarPanel,
-} from "./chat-sidebar-content.ts";
+  SidebarPanel,
+  type SidebarPanelProps,
+} from "./chat-sidebar-content.tsx";
 import {
   computeFileMatches,
   loadFileWrapPreference,
   saveFileWrapPreference,
-} from "./chat-sidebar-file-view.ts";
+} from "./chat-sidebar-file-view.tsx";
 import type { FileEditorViewHandle } from "./file-editor-view.ts";
 
 registerEnglishCatalog(registerFilePreviewEnglish);
@@ -133,7 +134,15 @@ function DetailPanel(props: ChatDetailPanelProps, host: SolidBridgeElement<ChatD
     fileReloading = false;
     fileSaving = false;
     fileSaveNotice = null;
-    const restoredDraft = restoreFileDraft(content?.kind === "file" ? content : null);
+    const retainedDraft =
+      content?.kind === "file" && content.edit ? readFileDraft(content) : undefined;
+    const restoredDraft =
+      content?.kind === "file" && retainedDraft?.content !== content.content
+        ? retainedDraft
+        : undefined;
+    if (retainedDraft && !restoredDraft && content?.kind === "file") {
+      setFileDraft(content, null);
+    }
     fileDraftContent = restoredDraft?.content ?? null;
     fileSavedContent = content?.kind === "file" ? content.content : "";
     fileHash =
@@ -600,7 +609,7 @@ function DetailPanel(props: ChatDetailPanelProps, host: SolidBridgeElement<ChatD
   let previousNavigation: FileSidebarNavigation | null | undefined;
   let previousRuntime: AttachmentSidebarRuntime | undefined;
   let navigate = false;
-  function renderPanel() {
+  function renderPanel(): SidebarPanelProps {
     const content = props.content;
     const navigation = props.fileNavigation;
     const runtime = props.attachmentRuntime;
@@ -621,14 +630,13 @@ function DetailPanel(props: ChatDetailPanelProps, host: SolidBridgeElement<ChatD
       previousRuntime = runtime;
     }
 
-    // The retained Lit render helpers do not subscribe to Solid's locale projection yet.
     t("common.loading");
     const file = htmlPreview.file;
     const matches = fileSearchMatches();
     const currentMatchIndex = matches.length
       ? Math.min(fileSearchMatchIndex, matches.length - 1)
       : 0;
-    return renderSidebarPanel({
+    return {
       content: visibleContent,
       showingRawText: Boolean(rawView),
       error: file ? null : error,
@@ -687,7 +695,7 @@ function DetailPanel(props: ChatDetailPanelProps, host: SolidBridgeElement<ChatD
       onAttachmentUpdate: invalidate,
       attachmentRuntime: props.attachmentRuntime,
       attachmentDownload,
-    });
+    };
   }
 
   const lifecycle = createSolidRenderLifecycle({
@@ -701,7 +709,7 @@ function DetailPanel(props: ChatDetailPanelProps, host: SolidBridgeElement<ChatD
     () => {
       const scrollToNavigation = navigate;
       navigate = false;
-      // LitContent commits in its own effect; mount CodeMirror after that effect finishes.
+      // Mount CodeMirror after the sidebar has committed its editor host.
       queueMicrotask(() => {
         if (!disposed) {
           updateEditor(scrollToNavigation);
@@ -724,7 +732,7 @@ function DetailPanel(props: ChatDetailPanelProps, host: SolidBridgeElement<ChatD
     destroyFileEditor();
     releaseChatMediaResourceSubscriber(invalidate);
   });
-  return <LitContent render={() => lifecycle.snapshot()} />;
+  return <SidebarPanel {...lifecycle.snapshot()} />;
 }
 
 export const ChatDetailPanel = defineSolidBridge("openclaw-chat-detail-panel", DetailPanel, {

@@ -37,6 +37,7 @@ import {
   type SessionSourceAssertion,
 } from "../config/sessions/session-source-authority.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { hasInternalHookListeners } from "../hooks/internal-hooks.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { isPathInside } from "../infra/path-guards.js";
 import {
@@ -137,14 +138,11 @@ async function prepareSpawnParentWorktreeSource(
       `Spawn parent ${sourceKind} changed; retry from its current session`,
     );
   };
-  const assertRouting = captureSessionMutationRouting(parent.cfg, refuse);
-  const metadata = captureSessionEntryMetadataRead({
-    agentId,
-    sessionKey: parent.canonicalKey,
-    storePath: parent.storePath,
-  });
+  const scope = { agentId, sessionKey: parent.canonicalKey, storePath: parent.storePath };
+  const assertRouting = captureSessionMutationRouting(parent.cfg, refuse, [scope]);
+  const metadata = captureSessionEntryMetadataRead(scope);
   const parentSource = captureSessionEntrySourceAssertion({
-    scope: { agentId, sessionKey: parent.canonicalKey, storePath: parent.storePath },
+    scope,
     readSource: parent.capturedReadSource,
     expected: parent.entry,
     fields,
@@ -306,6 +304,7 @@ export async function prepareSessionWorktree(params: {
   acceptedSource?: AcceptedWorktreeSource;
   withRollback?: SpawnParentWorktreeSource["withRollback"];
   onProgress?: CreateManagedWorktreeParams["onProgress"];
+  onPromptReady?: (prepared: PreparedGatewaySessionLifecycle) => Promise<void>;
 }): ReturnType<PrepareGatewaySessionLifecycle> {
   const { target, commitGuard } = params;
   const context = captureWorktreeRunEndContext(process.env);
@@ -467,6 +466,33 @@ export async function prepareSessionWorktree(params: {
       withSource,
       withRollback,
       onProgress: params.onProgress,
+      // Sandboxes require a published registry owner before creating their projection.
+      // Nested cwd discovery also retains complete checkout as its prompt boundary.
+      ...(params.onPromptReady &&
+      !sandboxRequired &&
+      // Bootstrap hooks can read configured or custom paths outside the prepared files.
+      !hasInternalHookListeners("agent", "bootstrap") &&
+      repository &&
+      workspace === repository.sourceRoot
+        ? {
+            onPromptReady: async (
+              worktree: Parameters<NonNullable<CreateManagedWorktreeParams["onPromptReady"]>>[0],
+            ) => {
+              commitGuard?.();
+              await params.onPromptReady!({
+                spawnedCwd: worktree.path,
+                sessionRoot: worktree.path,
+                worktree: {
+                  id: worktree.id,
+                  branch: worktree.branch,
+                  repoRoot: worktree.repoRoot,
+                  canonicalWorkspaceDir: workspace,
+                },
+              });
+              commitGuard?.();
+            },
+          }
+        : {}),
     };
     const { record: worktree, materialized } = workspace
       ? await worktrees.createWithOutcome({
@@ -574,7 +600,7 @@ export async function prepareSessionWorktreeCreation(params: {
   onTitleError: (error: unknown) => void;
   onTitlePersisted: () => void;
 }): ReturnType<PrepareGatewaySessionLifecycle> {
-  const { cfg, target: lifecycleTarget, signal, commitGuard } = params;
+  const { cfg, target: lifecycleTarget, signal, commitGuard, name, baseRef } = params;
   commitGuard();
   const acceptedWorktree = params.inheritParentKey ? lifecycleTarget.entry?.worktree : undefined;
   const acceptedPending = params.inheritParentKey
@@ -614,8 +640,6 @@ export async function prepareSessionWorktreeCreation(params: {
     acceptedPending?.workspace ??
     inheritedSource?.workspace ??
     resolveAgentWorkspaceDir(cfg, lifecycleTarget.agentId);
-  const name = params.name;
-  const baseRef = params.baseRef;
   if (withSource) {
     await withSource((current) => {
       commitGuard();
@@ -664,7 +688,6 @@ export async function prepareSessionWorktreeCreation(params: {
       },
     };
   }
-  const source = params.titleSource;
   // Empty creates have no persisted generation until the lifecycle owner commits.
   const title =
     !name && !params.label && lifecycleTarget.entry && lifecycleTarget.titleModelSelection !== null
@@ -679,7 +702,7 @@ export async function prepareSessionWorktreeCreation(params: {
           sessionKey: lifecycleTarget.key,
           storePath: lifecycleTarget.storePath,
           currentUserMessage: params.currentUserMessage,
-          userMessage: source,
+          userMessage: params.titleSource,
           commitGuard,
           withSource,
           onError: params.onTitleError,
@@ -700,8 +723,5 @@ export async function prepareSessionWorktreeCreation(params: {
     withSource,
     withRollback: inheritedSource?.withRollback,
   });
-  if (prepared.ok) {
-    return ok({ ...prepared.value, ...(withCommit ? { withCommit } : {}) });
-  }
-  return prepared;
+  return prepared.ok ? ok({ ...prepared.value, ...(withCommit ? { withCommit } : {}) }) : prepared;
 }

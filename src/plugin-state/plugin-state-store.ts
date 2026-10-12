@@ -62,7 +62,26 @@ import {
   type PreparedKeyedStoreOptions,
   type PreparedRegisterParams,
 } from "./plugin-state-store.validation.js";
-import * as worker from "./plugin-state-worker-client.js";
+import {
+  comparePluginStateDeleteInWorker,
+  comparePluginStateUpdateInWorker,
+  observePluginStateInWorker,
+  clearPluginStateInWorker,
+  consumePluginStateInWorker,
+  countPluginStateInWorker,
+  deletePluginStateIfEqualInWorker,
+  deletePluginStateInWorker,
+  listPluginStateInWorker,
+  listPluginStateInKeyRangeInWorker,
+  movePluginStateEntriesInWorker,
+  registerPluginStateJournalInWorker,
+  lookupManyPluginStateInWorker,
+  lookupPluginStateInWorker,
+  registerPluginStateIfAbsentInWorker,
+  registerPluginStateInWorker,
+  replacePluginStateInWorker,
+  replacePluginStateEntryInWorker,
+} from "./plugin-state-worker-client.js";
 import { serializePluginStoreJson } from "./plugin-store-validation.js";
 
 export type {
@@ -167,7 +186,7 @@ function createAsyncKeyedStore<T>(
     createOperation: (stores, handler, authority) =>
       createPluginStateOperation(store, stores, handler, authority),
     observe: async (key) => {
-      const observation = await worker.observePluginStateInWorker({
+      const observation = await observePluginStateInWorker({
         ...scope,
         key: validateKey(key, "lookup"),
       });
@@ -209,14 +228,14 @@ function createAsyncKeyedStore<T>(
           { ttlMs: intent.ttlMs },
           prepared.namespace,
         );
-        result = await worker.comparePluginStateUpdateInWorker({
+        result = await comparePluginStateUpdateInWorker({
           ...common,
           ...next,
           operation: "update",
           action: "set",
         });
       } else if (intent.operation === "update" && intent.action === "keep") {
-        result = await worker.comparePluginStateUpdateInWorker({
+        result = await comparePluginStateUpdateInWorker({
           ...common,
           operation: "update",
           action: "keep",
@@ -225,7 +244,7 @@ function createAsyncKeyedStore<T>(
         intent.operation === "delete" &&
         (intent.action === "delete" || intent.action === "keep")
       ) {
-        result = await worker.comparePluginStateDeleteInWorker({
+        result = await comparePluginStateDeleteInWorker({
           ...common,
           operation: "delete",
           action: intent.action,
@@ -244,7 +263,7 @@ function createAsyncKeyedStore<T>(
         opts,
         prepared.namespace,
       );
-      await worker.registerPluginStateInWorker({
+      await registerPluginStateInWorker({
         ...scope,
         ...entry,
         assertCurrent: opts?.assertCurrent,
@@ -260,7 +279,7 @@ function createAsyncKeyedStore<T>(
         opts,
         prepared.namespace,
       );
-      return await worker.registerPluginStateIfAbsentInWorker({
+      return await registerPluginStateIfAbsentInWorker({
         ...scope,
         maxEntries: prepared.maxEntries,
         overflowPolicy: prepared.overflowPolicy,
@@ -281,7 +300,7 @@ function createAsyncKeyedStore<T>(
           limit: (message) => invalidInput(message, "delete"),
         },
       });
-      return await worker.deletePluginStateIfEqualInWorker({
+      return await deletePluginStateIfEqualInWorker({
         ...scope,
         key: normalizedKey,
         expected,
@@ -290,29 +309,23 @@ function createAsyncKeyedStore<T>(
     lookup: async (key) => {
       const normalizedKey = validateKey(key, "lookup");
       // SAFETY: This namespace stores the caller's serialized JSON value type.
-      return (await worker.lookupPluginStateInWorker({ ...scope, key: normalizedKey })) as
-        | T
-        | undefined;
+      return (await lookupPluginStateInWorker({ ...scope, key: normalizedKey })) as T | undefined;
     },
     lookupMany: async (keys) => {
       const normalizedKeys = prepareLookupKeys(keys);
-      const results = await worker.lookupManyPluginStateInWorker({
-        ...scope,
-        keys: normalizedKeys,
-      });
       // SAFETY: Successful slots carry this namespace's caller-selected JSON value type.
-      return results as Array<Result<T | undefined, PluginStateStoreError>>;
+      return (await lookupManyPluginStateInWorker({ ...scope, keys: normalizedKeys })) as Array<
+        Result<T | undefined, PluginStateStoreError>
+      >;
     },
     consume: async (key) => {
       const normalizedKey = validateKey(key, "consume");
       // SAFETY: The atomically consumed value has this namespace's caller-selected JSON type.
-      return (await worker.consumePluginStateInWorker({ ...scope, key: normalizedKey })) as
-        | T
-        | undefined;
+      return (await consumePluginStateInWorker({ ...scope, key: normalizedKey })) as T | undefined;
     },
     delete: async (key, opts) => {
       const normalizedKey = validateKey(key, "delete");
-      return await worker.deletePluginStateInWorker({
+      return await deletePluginStateInWorker({
         ...scope,
         key: normalizedKey,
         assertCurrent: opts?.assertCurrent,
@@ -321,7 +334,7 @@ function createAsyncKeyedStore<T>(
     },
     entries: async () => {
       // SAFETY: Entries come from this namespace and retain the caller's JSON value type.
-      return (await worker.listPluginStateInWorker(scope)) as PluginStateEntry<T>[];
+      return (await listPluginStateInWorker(scope)) as PluginStateEntry<T>[];
     },
     entriesInKeyRange: async (range) => {
       const params = {
@@ -334,7 +347,7 @@ function createAsyncKeyedStore<T>(
       };
       validatePluginStateKeyRange(params);
       // SAFETY: The range remains bound to this store's namespace and JSON value type.
-      return (await worker.listPluginStateInKeyRangeInWorker(params)) as PluginStateEntry<T>[];
+      return (await listPluginStateInKeyRangeInWorker(params)) as PluginStateEntry<T>[];
     },
     moveEntriesFrom: async (source) => {
       assertActive?.();
@@ -359,16 +372,16 @@ function createAsyncKeyedStore<T>(
         sources.add(entry.sourceKey);
         return entry;
       });
-      return worker.movePluginStateEntriesInWorker({
+      return movePluginStateEntriesInWorker({
         ...scope,
         sourceNamespace,
         entries,
         assertActive,
       });
     },
-    count: async () => await worker.countPluginStateInWorker(scope),
+    count: async () => await countPluginStateInWorker(scope),
     clear: async () => {
-      await worker.clearPluginStateInWorker(scope);
+      await clearPluginStateInWorker(scope);
     },
   };
   return bindPluginStateNativeBindingStore(
@@ -645,7 +658,7 @@ export async function registerPluginStateSequencedJournalEntry(params: {
     defaultTtlMs: journalDefaultTtlMs,
   });
   const journalValueJson = preparePluginStateJournalValue(params.journalValue);
-  return worker.registerPluginStateJournalInWorker({
+  return registerPluginStateJournalInWorker({
     pluginId: params.pluginId,
     cursorNamespace,
     cursorKey,
@@ -670,7 +683,7 @@ export async function pluginStateEntriesInKeyRange(
   params: PluginStateKeyRangeParams & { env?: NodeJS.ProcessEnv },
 ): Promise<PluginStateEntry<unknown>[]> {
   validatePluginStateKeyRange(params);
-  return worker.listPluginStateInKeyRangeInWorker(params);
+  return listPluginStateInKeyRangeInWorker(params);
 }
 
 /** Opens an async plugin-state namespace for a trusted core owner id. */
@@ -690,13 +703,13 @@ export function prepareCorePluginStateReplacement<T>(
   return {
     async entries(): Promise<PluginStateEntry<T>[]> {
       // SAFETY: This namespace stores the core caller's serialized JSON value type.
-      return (await worker.listPluginStateInWorker(scope)) as PluginStateEntry<T>[];
+      return (await listPluginStateInWorker(scope)) as PluginStateEntry<T>[];
     },
     async replace(entries: ReadonlyMap<string, T>): Promise<void> {
       const values = Array.from(entries, ([key, value]) =>
         prepareRegisterParams(key, value, prepared.defaultTtlMs, undefined, prepared.namespace),
       );
-      await worker.replacePluginStateInWorker({ ...scope, entries: values });
+      await replacePluginStateInWorker({ ...scope, entries: values });
     },
   };
 }
@@ -722,10 +735,10 @@ export async function replaceCorePluginStateEntry(
       prepared.namespace,
     );
   } catch (error) {
-    await worker.deletePluginStateInWorker({ ...scope, key: normalizedKey });
+    await deletePluginStateInWorker({ ...scope, key: normalizedKey });
     throw error;
   }
-  await worker.replacePluginStateEntryInWorker({ ...scope, ...entry });
+  await replacePluginStateEntryInWorker({ ...scope, ...entry });
 }
 
 /** Opens a sync plugin-state namespace for a trusted core owner id. */

@@ -10,6 +10,7 @@ import {
 import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { resolveIdentityPathViaExistingAncestorSync } from "./boundary-path.js";
+import { StateDatabaseAdmissionPendingError } from "./gateway-state-owner-record.js";
 import {
   captureSqliteDatabaseAdmissions,
   createSqliteDatabaseAdmissionCursor,
@@ -22,40 +23,63 @@ import {
 import { currentSqliteOperationTiming } from "./sqlite-reader-lifecycle.js";
 import { SqliteWorkerAdmissionTimeoutError, SqliteWorkerError } from "./sqlite-worker-contract.js";
 import {
+  SQLITE_COLD_ADMISSION_PENDING,
   exchangeDatabaseAdmissions,
   exchangeSqliteDatabaseAdmissions,
   getSqliteDatabaseAdmissionUpstream,
 } from "./sqlite-worker-database-admission-relay.js";
-import type {
-  SqliteWorkerAdmissionRequest,
-  SqliteWorkerOperationAdmission,
-  AdmissionFailureSource,
-  DatabaseAuthority,
-  CommitObserver,
-  AdmissionHandler,
-} from "./sqlite-worker-operation-admission.types.js";
 import {
   deferSqliteWorkerNativeCommitReceipt,
   currentSqliteWorkerOperationAdmission as currentAdmission,
   type WorkerAdmissionScope,
   readNativeCommitReceipt,
   type NativeCommitReceipt,
+  type RetainedWorkerTransactionAdmission,
   type SqliteWorkerNativeSettlement,
   type SqliteWorkerNativeSettlementOwner,
   type SqliteWorkerOperationContext,
 } from "./sqlite-worker-operation-settlement.js";
-
-export type {
-  SqliteWorkerAdmissionRequest,
-  SqliteWorkerOperationAdmission,
-  SqliteWorkerAdmissionFactory,
-} from "./sqlite-worker-operation-admission.types.js";
 
 const REQUESTED = 0;
 const GRANTED = 1;
 const REFUSED = 2;
 const TIMED_OUT = 3;
 
+export type SqliteWorkerAdmissionRequest = {
+  stage: "open" | "prepare" | "transaction" | "commit";
+  facts: unknown;
+  /** Opt-in wait budget in milliseconds; omission retains the live-owner wait. */
+  deadlineMs?: number;
+};
+
+type AdmissionFailureSource = "authority" | "domain" | "protocol";
+type DatabaseAuthority = {
+  databasePath: string;
+  /** Only the broker can identify an initial open of its captured primary database. */
+  coldOpenPath?: string;
+  assertRequest?(): void;
+  assertAccess(): void;
+  assertCreate?(databasePath: string): void;
+  acquireSchema(): { assertCurrent(): void; release(): void };
+};
+
+export type SqliteWorkerOperationAdmission = SqliteWorkerNativeSettlementOwner & {
+  readonly port: MessagePort;
+  readonly failure: unknown;
+  readonly failureSource: AdmissionFailureSource | undefined;
+  readonly cleanupFailures: readonly unknown[];
+  observeRequests(observer: (request: SqliteWorkerAdmissionRequest) => void): void;
+  service(): void;
+  finish(): void;
+  bindDatabaseAuthority(authority: DatabaseAuthority): void;
+};
+
+export type SqliteWorkerAdmissionFactory = (operation: RetainedWorkerTransactionAdmission) => {
+  admission: SqliteWorkerOperationAdmission;
+  nativeLocations: readonly string[];
+};
+
+type CommitObserver = (committed: { facts: unknown }) => void;
 const commitObserverBindings = new WeakMap<
   SqliteWorkerOperationAdmission,
   (observer: CommitObserver) => void
@@ -72,6 +96,11 @@ export function observeSqliteWorkerCommittedFacts(
   }
   bind(observer);
 }
+
+type AdmissionHandler = (
+  request: SqliteWorkerAdmissionRequest,
+  grant: (beforeRelease?: () => void) => boolean,
+) => void;
 
 /** The optional continuation runs under live host authority before releasing the native writer. */
 export const createSqliteWorkerOperationAdmission = (
@@ -198,6 +227,7 @@ function createOperationAdmission(
         return;
       }
       const decision = new Int32Array(message.decision);
+      let coldOpenPath: string | undefined;
       try {
         if (closed) {
           throw new SqliteWorkerError("SQLite worker admission is closed", "closed");
@@ -226,11 +256,19 @@ function createOperationAdmission(
           if (message.create === "admitted") {
             create = true;
           } else if (authority && assertCreate) {
+            if (
+              authority.coldOpenPath &&
+              resolveIdentityPathViaExistingAncestorSync(authority.coldOpenPath) ===
+                creationLocation
+            ) {
+              coldOpenPath = authority.coldOpenPath;
+            }
             inOwnerContext(() => {
               authority.assertRequest?.();
               authority.assertAccess();
               assertCreate(creationLocation);
             });
+            coldOpenPath = undefined;
             create = true;
           }
         }
@@ -272,8 +310,17 @@ function createOperationAdmission(
         message.port.postMessage(reply, []);
         Atomics.store(decision, 0, GRANTED);
       } catch (error) {
-        recordFailure(error, "protocol");
-        Atomics.store(decision, 0, REFUSED);
+        if (
+          error instanceof StateDatabaseAdmissionPendingError &&
+          error.databasePath === coldOpenPath
+        ) {
+          // Nothing was created: preserve the worker cold-open owner's existing
+          // bounded wait rather than poisoning this operation as a protocol failure.
+          Atomics.store(decision, 0, SQLITE_COLD_ADMISSION_PENDING);
+        } else {
+          recordFailure(error, "protocol");
+          Atomics.store(decision, 0, REFUSED);
+        }
       } finally {
         message.port.close();
         Atomics.notify(decision, 0);

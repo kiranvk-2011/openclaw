@@ -80,6 +80,8 @@ afterEach(() => {
 
 describe("plugin-owned CLI native tool policy", () => {
   it("uses the admitted turn policy when a warm transport retains a retired generation", async () => {
+    // Generation policy, not cold worker startup, owns this fixture's outcome.
+    vi.useFakeTimers({ toFake: ["Date"] });
     const oldHook = vi.fn();
     const previous = createMockPluginRegistry([
       { hookName: "before_tool_call", pluginId: "guard", handler: oldHook },
@@ -557,10 +559,11 @@ describe("plugin-owned CLI same-turn input", () => {
     const run = runPlugin(context, async function* (execution) {
       execution.registerMessageInjection?.({
         isAvailable: () => true,
-        queueMessage: async (text, assertCurrent) => {
-          assertCurrent();
-          queued.push(text);
-          injected.resolve();
+        queueMessage: async (text, withCurrent) => {
+          await withCurrent(() => {
+            queued.push(text);
+            injected.resolve();
+          });
         },
       });
       await injected.promise;
@@ -600,12 +603,13 @@ describe("plugin-owned CLI same-turn input", () => {
     const run = runPlugin(context, async function* (execution) {
       execution.registerMessageInjection?.({
         isAvailable: () => true,
-        queueMessage: async (text, assertCurrent) => {
-          assertCurrent();
-          if (text === "refused") {
-            throw new Error("native refused");
-          }
-          order.push(`started:${text}`);
+        queueMessage: async (text, withCurrent) => {
+          await withCurrent(() => {
+            if (text === "refused") {
+              throw new Error("native refused");
+            }
+            order.push(`started:${text}`);
+          });
         },
       });
       await finish.promise;
@@ -696,8 +700,8 @@ describe("plugin-owned CLI same-turn input", () => {
       signal = execution.abortSignal;
       execution.registerMessageInjection?.({
         isAvailable: () => true,
-        queueMessage: async (_text, assertCurrent) => {
-          assertCurrent();
+        queueMessage: async (_text, withCurrent) => {
+          await withCurrent(() => {});
         },
       });
       await finish.promise;
@@ -744,9 +748,10 @@ describe("plugin-owned CLI same-turn input", () => {
     const run = runPlugin(context, async function* (execution) {
       execution.registerMessageInjection?.({
         isAvailable: () => true,
-        queueMessage: async (text, assertCurrent) => {
-          assertCurrent();
-          queued.push(text);
+        queueMessage: async (text, withCurrent) => {
+          await withCurrent(() => {
+            queued.push(text);
+          });
         },
       });
       ready.resolve();

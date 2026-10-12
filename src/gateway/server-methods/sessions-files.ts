@@ -20,6 +20,7 @@ import { getAgentWorkspaceAccess } from "../../agents/workspace-access.js";
 import { DEFAULT_IDENTITY_FILENAME } from "../../agents/workspace-bootstrap-policy.js";
 import { getRuntimeConfig } from "../../config/io.js";
 import type { SessionEntryReadScope } from "../../config/sessions/session-accessor.types.js";
+import { getSessionActorStorageBinding } from "../../config/sessions/session-actor-storage-binding.js";
 import { captureSessionEntryMetadataRead } from "../../config/sessions/session-entry-source-authority.js";
 import { captureIncognitoSessionBinding } from "../../config/sessions/session-incognito-binding.js";
 import type { InternalSessionEntry } from "../../config/sessions/types.js";
@@ -35,6 +36,7 @@ import type { SessionTranscriptReadScope } from "../session-transcript-readers.j
 import { withGatewaySessionEntryReadOnly } from "../session-utils-read-lifetime.js";
 import { loadGatewaySessionEntryReadOnly } from "../session-utils.js";
 import { resolveSessionWorkspaceRoots } from "../session-workspace-roots.js";
+import { readSessionWorkerPlacementAsync } from "../worker-environments/session-placement-lifecycle.js";
 import { WORKSPACE_PREVIEW_MAX_BYTES } from "../workspace-file-limits.js";
 import {
   execOpenPath,
@@ -51,7 +53,7 @@ import {
 } from "./session-repository-artifacts.js";
 import { resolveRepositoryWorkspaceAccess } from "./session-repository-workspace-access.js";
 import { retainSessionScopedRead } from "./session-scoped-read.js";
-import { loadSqliteTouchedFiles } from "./session-touched-files.js";
+import { loadSessionTouchedFiles } from "./session-touched-files.js";
 import { getSessionWorkspaceAssets } from "./sessions-file-assets.js";
 import type {
   GatewayRequestContext,
@@ -150,14 +152,9 @@ export function withSessionFileRoot<T>(
 ): Promise<T> {
   const metadata = captureSessionEntryMetadataRead(params);
   if (!metadata) {
-    return consume(
-      loadSessionFileRoot(
-        loadGatewaySessionEntryReadOnly(params.sessionKey, {
-          agentId: params.agentId,
-          projection: params.projection,
-        }),
-      ),
-      () => {},
+    return withGatewaySessionEntryReadOnly(
+      { cfg, key: params.sessionKey, agentId: params.agentId, projection: params.projection },
+      (loaded, assertCurrent) => consume(loadSessionFileRoot(loaded), assertCurrent),
     );
   }
   return withGatewaySessionEntryReadOnly(
@@ -246,10 +243,14 @@ async function loadSessionFiles(
   const target = await resolveTranscriptReadTarget(scope);
   // Entry-scoped reads without an explicit sessionFile always resolve to a canonical SQLite marker.
   // Legacy transcript files are doctor-owned migration debt, not a runtime read path.
-  const actor = captureIncognitoSessionBinding(scope)?.actor;
-  const files = await loadSqliteTouchedFiles(
+  const memory = getSessionActorStorageBinding(scope);
+  const actor = memory ? undefined : captureIncognitoSessionBinding(scope)?.actor;
+  const sourceIdentity = memory
+    ? JSON.stringify(memory.actor.target.database)
+    : actor?.identity.incarnation;
+  const files = await loadSessionTouchedFiles(
     toTranscriptReadScope(target),
-    `${agentId}\0${entry.sessionId}\0${target.storePath ?? ""}${actor ? `\0${actor.identity.incarnation}` : ""}`,
+    `${agentId}\0${entry.sessionId}\0${target.storePath ?? ""}${sourceIdentity ? `\0${sourceIdentity}` : ""}`,
   );
   return {
     repository,
@@ -608,11 +609,10 @@ export const sessionsFilesHandlers: GatewayRequestHandlers = {
             });
             return;
           }
-          const placement = loaded.entry?.sessionId
-            ? context.workerSessionPlacementService
-                ?.getMany([loaded.entry.sessionId])
-                .get(loaded.entry.sessionId)
-            : undefined;
+          const placement = await readSessionWorkerPlacementAsync({
+            context,
+            sessionId: loaded.entry?.sessionId,
+          });
           if (isCloudWorkerPlacementState(placement?.state)) {
             respond(true, {
               ok: false,

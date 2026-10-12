@@ -18,6 +18,8 @@ import {
   sessionNavigationTarget,
 } from "../lib/sessions/route-navigation.ts";
 import {
+  areUiSessionKeysEquivalent,
+  buildAgentMainSessionKey,
   normalizeAgentId,
   resolveUiDefaultAgentId,
   resolveUiSessionRowAgentId,
@@ -41,8 +43,6 @@ import {
 } from "./app-sidebar-session-catalogs.ts";
 import {
   findSidebarHovercardRow,
-  findSidebarMainSession,
-  findSidebarResumeKey,
   mergeAdoptedSessionPullRequestRows,
 } from "./app-sidebar-session-lookup.ts";
 import {
@@ -53,6 +53,7 @@ import {
   findSidebarSessionInTree,
   projectSidebarVisibleMainSession,
   resolveActiveSidebarAgent,
+  resolveLatestSidebarAgentSession,
   resolveSidebarMainSessionKey,
   toggleSidebarSessionSelection,
   type SidebarSessionNavigationState,
@@ -557,7 +558,12 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
   }
 
   private agentResumeKey(agentId: string): string {
-    return findSidebarResumeKey(agentId, this, () => this.sessionMainKey());
+    const latest = resolveLatestSidebarAgentSession({
+      agentId,
+      sessionData: this.sessionData,
+      context: this.context,
+    });
+    return latest?.key ?? buildAgentMainSessionKey({ agentId, mainKey: this.sessionMainKey() });
   }
 
   /** Offline routes to Settings instead of a dead chat load. */
@@ -729,7 +735,19 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
 
   /** Gateway row backing the identity card (unread/running state), if loaded. */
   mainSessionRow(agentId?: string): GatewaySessionRow | null {
-    return findSidebarMainSession(this, agentId, this.groupedSessionSource?.result);
+    const normalized = normalizeAgentId(agentId ?? this.expandedAgentId());
+    const mainKey = this.selectedAgentMainSessionKey(normalized);
+    const rows =
+      this.groupedSessionSource?.result?.sessions ??
+      (normalized === normalizeAgentId(this.sessionData.sessionsAgentId ?? "")
+        ? (this.sessionData.sessionsResult?.sessions ?? [])
+        : (this.sessionData.sessionResultsByAgent[normalized]?.sessions ?? []));
+    const lineage = this.sessionData.activeSessionLineageRoot;
+    return (
+      (lineage ? [...rows, lineage] : rows).find((row) =>
+        areUiSessionKeysEquivalent(row.key, mainKey),
+      ) ?? null
+    );
   }
 
   /** Identity-card click: the agent's rolling main session, or Settings offline. */

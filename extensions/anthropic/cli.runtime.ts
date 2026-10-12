@@ -261,26 +261,34 @@ async function injectInput(
   session: ClaudeCliSession,
   turn: ClaudeCliTurn,
   text: string,
-  assertCurrent: () => void,
+  withCurrent: (submit: () => void) => Promise<void>,
 ): Promise<void> {
-  // Native lifecycle is the only receipt that proves the input joined this turn.
-  if (
-    !session.hasInputLifecycle ||
-    !session.transport ||
-    !turn.promptSubmitted ||
-    activeTurn(session) !== turn
-  ) {
-    throw new Error("The Claude CLI turn cannot accept more input.");
-  }
-  assertCurrent();
   const uuid = randomUUID();
   const started = createDeferred<void>();
   // Closing can reject the receipt while the write is still pending.
   void started.promise.catch(() => {});
-  turn.injectedInputs.set(uuid, { text, started });
-  turn.submittedInputUuids.add(uuid);
+  let written: Promise<void> | undefined;
+  await withCurrent(() => {
+    // Native lifecycle is the receipt; recheck availability after host preparation.
+    if (
+      !session.hasInputLifecycle ||
+      !session.transport ||
+      !turn.promptSubmitted ||
+      activeTurn(session) !== turn
+    ) {
+      throw new Error("The Claude CLI turn cannot accept more input.");
+    }
+    turn.injectedInputs.set(uuid, { text, started });
+    turn.submittedInputUuids.add(uuid);
+    written = session.transport.send(createUserInput(turn.context, text, uuid));
+    // Host admission cleanup may await after the synchronous write.
+    void written.catch(() => {});
+  });
+  if (!written) {
+    throw new Error("The host did not admit Claude CLI input.");
+  }
   try {
-    await session.transport.send(createUserInput(turn.context, text, uuid));
+    await written;
   } catch (error) {
     turn.injectedInputs.delete(uuid);
     throw error;
@@ -638,7 +646,7 @@ export async function* executeClaudeCli(
         turn.inputStarted &&
         turn.promptSubmitted &&
         activeTurn(session) === turn,
-      queueMessage: (text, assertCurrent) => injectInput(session, turn, text, assertCurrent),
+      queueMessage: (text, withCurrent) => injectInput(session, turn, text, withCurrent),
     });
     for await (const record of turn.events) {
       yield record;

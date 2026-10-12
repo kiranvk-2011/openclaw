@@ -214,10 +214,10 @@ export type CliBackendLiveSessionCapability = {
 export type CliBackendMessageInjection = {
   isAvailable(): boolean;
   /**
-   * Delivers user text into the running native turn. Invoke assertCurrent synchronously
-   * immediately before the write; resolve only after the runtime starts the input.
+   * Ask the host to prepare current authority and invoke the synchronous native write.
+   * Resolve only after the runtime acknowledges consumption, not after the write.
    */
-  queueMessage(text: string, assertCurrent: () => void): Promise<void>;
+  queueMessage(text: string, withCurrent: (submit: () => void) => Promise<void>): Promise<void>;
 };
 
 /** Turn-only context that must not become an operator-authored native transcript row. */
@@ -456,6 +456,8 @@ type CliBackendPluginBase = {
     modelDisplay: string;
     agentId?: string;
     systemPrompt: string;
+    /** Short IDs of OpenClaw MCP tools exposed to this invocation after policy filtering. */
+    openClawMcpToolNames?: readonly string[];
   }) => string | null | undefined;
   /**
    * Backend-owned bidirectional text replacements.

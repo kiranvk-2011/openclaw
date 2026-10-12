@@ -1,3 +1,13 @@
+import { expect } from "vitest";
+
+export function resultDetail(records: Record<string, unknown>[]): Record<string, unknown> {
+  const result = records.findLast((record) => record.type === "result");
+  expect(result).toEqual(
+    expect.objectContaining({ subtype: "success", result: expect.any(String) }),
+  );
+  return JSON.parse(String(result?.result)) as Record<string, unknown>;
+}
+
 export const CLAUDE_PROTOCOL_FIXTURE = String.raw`
 import assert from "node:assert/strict";
 import { createInterface } from "node:readline";
@@ -64,6 +74,7 @@ const result = (detail = {}) => send({
   type: "result", subtype: "success", is_error: false,
   result: JSON.stringify({ pid: process.pid, turn, user, privateContext, initialize, argv: process.argv.slice(2), ...detail }),
   session_id: "fixture-session",
+  ...(detail.injectedContext ? { user_message_uuid: pendingInputUuid } : {}),
   ...((!replayReceipts || scenario === "background-bash-overlap") && detail.finalBackgroundAnswer ? {
     origin: { kind: "task-notification", producer: "session-task" }, num_turns: 1, stop_reason: "end_turn",
   } : {}),
@@ -134,9 +145,10 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (scenario === "input-lifecycle") {
       if (turn > 1) {
         pendingInputUuid = message.uuid;
-        send({ type: "result", subtype: "success", result: "stale replay", session_id: "fixture-session" });
+        send({ type: "result", subtype: "success", user_message_uuid: "prior-turn", result: "stale replay", session_id: "fixture-session" });
         send({ type: "command_lifecycle", state: "started", command_uuid: "unrelated-uuid" });
-        send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "stale text" }] } });
+        send({ type: "stream_event", user_message_uuid: "prior-turn", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "stale text" } } });
+        send({ type: "assistant", user_message_uuid: "prior-turn", message: { role: "assistant", content: [{ type: "text", text: "stale text" }] } });
         request("prior-pre", { subtype: "hook_callback", callback_id: hooks.PreToolUse[0].hookCallbackIds[0],
           input: { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: "prior-turn.txt" } },
           tool_use_id: "prior-tool" });
@@ -295,7 +307,8 @@ for await (const line of createInterface({ input: process.stdin })) {
       if (scenario === "steer-after-result") {
         send({ type: "system", subtype: "init", capabilities: ["msg_lifecycle_v1"] });
       }
-      send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "steered" }] } });
+      send({ type: "stream_event", user_message_uuid: pendingInputUuid, event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "steered" } } });
+      send({ type: "assistant", user_message_uuid: pendingInputUuid, message: { role: "assistant", content: [{ type: "text", text: "steered" }] } });
       if (scenario.includes("notification-replay")) {
         send({ type: "system", subtype: "background_tasks_changed",
           tasks: [{ task_id: "background-agent", task_type: "local_agent" }] });

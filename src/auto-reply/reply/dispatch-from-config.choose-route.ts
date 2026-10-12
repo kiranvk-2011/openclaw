@@ -6,6 +6,8 @@ import {
 import { scopeCommandTranscriptId } from "../../config/sessions/command-transcript.js";
 import { logVerbose } from "../../globals.js";
 import { formatErrorMessage } from "../../infra/errors.js";
+import { withClaimingHookAdmission } from "../../plugins/hook-claim-admission.js";
+import { createPluginSubagentRequesterContext } from "../../plugins/runtime/subagent-requester-context.js";
 import {
   buildCaptionedFinalTextFallback,
   cleanDeferredFinalText,
@@ -36,10 +38,7 @@ import {
 } from "./dispatch-from-config.payloads.js";
 import { suppressPendingFinalDelivery } from "./dispatch-from-config.pending-final.js";
 import type { PrepareDispatchOperationReadyState } from "./dispatch-from-config.prepare-operation.js";
-import {
-  prepareBeforeDispatchTakeover,
-  runReplyDispatchHook,
-} from "./dispatch-from-config.reply-dispatch-hook.js";
+import { runReplyDispatchHook } from "./dispatch-from-config.reply-dispatch-hook.js";
 import { createSessionMetadataChangeNotifier } from "./dispatch-from-config.session-metadata.js";
 import {
   captureDeliveredTranscriptMirror,
@@ -70,12 +69,19 @@ export async function chooseDispatchRoute(state: PrepareDispatchOperationReadySt
     deliveryChannel,
     dispatcher,
     getPreDispatchAbortSignal,
+    hookRunner,
     isRoutedReplyDelivered,
     markIdle,
     markInboundDedupeReplayUnsafe,
     params,
+    recordProcessed,
+    replyContextAccountId,
     replyRoute,
     resolvePreparedTranscriptBinding,
+    routeReplyChannel,
+    routeReplyThreadId,
+    routeReplyTo,
+    runWithDispatchLifecycleAdmission,
     sendPayloadAsync,
     sessionAgentId,
     sessionKey,
@@ -84,6 +90,7 @@ export async function chooseDispatchRoute(state: PrepareDispatchOperationReadySt
     shouldEmitVerboseProgressAsync,
     shouldRouteToOriginating,
     traceReplyPhase,
+    trackDispatchLifecycleWork,
     turnLedger,
   } = state;
   const shouldSuppressProgressDelivery = async () =>
@@ -211,7 +218,7 @@ export async function chooseDispatchRoute(state: PrepareDispatchOperationReadySt
       ctx.CommandInterpretationSuppressed ||
       !commandText?.startsWith("/") ||
       !commandId ||
-      metadata?.assistantTranscriptOwned ||
+      Boolean(metadata?.inlineCommandReply || metadata?.assistantTranscriptOwned) ||
       metadata?.assistantMessageIndex !== undefined
     ) {
       return undefined;
@@ -392,7 +399,7 @@ export async function chooseDispatchRoute(state: PrepareDispatchOperationReadySt
       : undefined;
     const hasTranscriptOwner =
       payloadMetadata?.assistantMessageIndex !== undefined ||
-      payloadMetadata?.assistantTranscriptOwned === true;
+      Boolean(payloadMetadata?.inlineCommandReply || payloadMetadata?.assistantTranscriptOwned);
     const hasVisibleFinalContent = hasOutboundReplyContent(payload, { trimText: true });
     if (hasVisibleFinalContent) {
       markInboundDedupeReplayUnsafe();
@@ -620,8 +627,75 @@ export async function chooseDispatchRoute(state: PrepareDispatchOperationReadySt
     };
   };
 
-  const beforeDispatchHook = prepareBeforeDispatchTakeover(state);
-  let takeover = beforeDispatchHook ? await beforeDispatchHook : undefined;
+  let takeover:
+    | { payload: ReplyPayload; deliveryId: string; recordProcessed: () => void }
+    | undefined;
+  if (
+    state.allowInboundHandlers &&
+    !admittedSessionSettingsRestrictRuntime(params.replyOptions?.admittedSessionSettings) &&
+    hookRunner?.hasHooks("before_dispatch")
+  ) {
+    // This outer lookup key is resolved from the routed context; fields inside
+    // sessionStoreEntry.entry cannot redirect hook or requester lineage.
+    const beforeDispatchSessionKey = sessionStoreEntry.sessionKey ?? sessionKey;
+    const pluginSubagentRequester = createPluginSubagentRequesterContext({
+      sessionKey: beforeDispatchSessionKey,
+      origin: {
+        channel: routeReplyChannel,
+        to: routeReplyTo,
+        accountId: replyContextAccountId,
+        threadId: routeReplyThreadId,
+      },
+    });
+    const beforeDispatchResult = await traceReplyPhase("reply.before_dispatch_hooks", () =>
+      runWithDispatchLifecycleAdmission(async () => {
+        return await runWithDispatchAbortSignal(
+          getPreDispatchAbortSignal(),
+          () => {
+            const hookContext = state.hookState.hookContext;
+            const replyContext = {
+              messageId: hookContext.messageId,
+              sessionKey: beforeDispatchSessionKey,
+              senderId: hookContext.senderId,
+              replyToId: hookContext.replyToId,
+              replyToIdFull: hookContext.replyToIdFull,
+              replyToBody: hookContext.replyToBody,
+              replyToSender: hookContext.replyToSender,
+              replyToIsQuote: hookContext.replyToIsQuote,
+            };
+            return hookRunner.runBeforeDispatch(
+              {
+                ...replyContext,
+                content: hookContext.content,
+                body: hookContext.bodyForAgent ?? hookContext.body,
+                channel: hookContext.channelId,
+                isGroup: hookContext.isGroup,
+                timestamp: hookContext.timestamp,
+              },
+              withClaimingHookAdmission(
+                {
+                  ...replyContext,
+                  channelId: hookContext.channelId,
+                  accountId: hookContext.accountId,
+                  conversationId: state.hookState.inboundClaimContext.conversationId,
+                },
+                { prepare: state.assertCurrentBindingRoute },
+              ),
+              pluginSubagentRequester,
+            );
+          },
+          trackDispatchLifecycleWork,
+        );
+      }),
+    );
+    if (beforeDispatchResult?.handled) {
+      takeover = {
+        payload: { text: beforeDispatchResult.text },
+        deliveryId: "before-dispatch",
+        recordProcessed: () => recordProcessed("completed", { reason: "before_dispatch_handled" }),
+      };
+    }
+  }
 
   if (
     !takeover &&

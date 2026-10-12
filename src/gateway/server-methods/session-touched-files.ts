@@ -155,7 +155,7 @@ async function foldSqliteTouchedFiles(
   });
 }
 
-export async function loadSqliteTouchedFiles(
+export async function loadSessionTouchedFiles(
   scope: SessionTranscriptReadScope,
   cacheKey: string,
 ): Promise<Map<string, TouchedFile>> {

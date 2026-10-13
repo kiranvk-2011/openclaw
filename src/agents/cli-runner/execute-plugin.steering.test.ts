@@ -13,10 +13,8 @@ import type { ReplyOperationRunState } from "../../auto-reply/reply/reply-operat
 import { beginReplyMessageInjectionTarget } from "../../auto-reply/reply/reply-run-registry.message-injection.js";
 import { createReplyOperation } from "../../auto-reply/reply/reply-run-registry.operation.js";
 import { replyRunRegistry } from "../../auto-reply/reply/reply-run-registry.registry.js";
-import {
-  prepareReplyToolAuthority,
-  resolveFollowupRunToolAuthorityFingerprintAsync,
-} from "../../auto-reply/reply/reply-tool-authority.js";
+import { prepareReplyToolAuthority } from "../../auto-reply/reply/reply-tool-authority.js";
+import { resolveFollowupRunToolAuthorityFingerprintAsync } from "../../auto-reply/reply/reply-tool-authority.test-support.js";
 import { createMockTypingController } from "../../auto-reply/reply/test-helpers.js";
 import { createTypingSignaler } from "../../auto-reply/reply/typing-mode.js";
 import {

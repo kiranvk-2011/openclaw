@@ -308,17 +308,17 @@ it("steers configured, session and explicit inputs through current authority int
               throw new Error("Expected worker-prepared Claude input");
             },
             prepareCurrent: async () => {
-              const read = await prepareReplyToolAuthorityCallerRead(
+              const authorityRead = await prepareReplyToolAuthorityCallerRead(
                 operation.projectToolAuthorityFingerprintAsync,
                 undefined,
                 fingerprint,
                 followupRun.run,
                 () => operation.abortSignal.throwIfAborted(),
               );
-              if (!read) {
+              if (!authorityRead) {
                 throw new Error("Claude input requires a worker-prepared policy read");
               }
-              await read.prepareCurrent();
+              await authorityRead.prepareCurrent();
             },
           }),
         ),

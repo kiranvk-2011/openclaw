@@ -33,7 +33,10 @@ import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-trans
 import { readTranscriptMessages } from "../../sessions/user-turn-transcript.test-support.js";
 import { loadBundledPluginFacade } from "../../test-utils/bundled-plugin-public-surface.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
-import { bindWorkerToolPreparation } from "../harness/host-private-capabilities.js";
+import {
+  bindWorkerToolPreparation,
+  prepareReplyToolAuthorityCallerRead,
+} from "../harness/host-private-capabilities.js";
 import { bindPreparedToolAuthority } from "../harness/tool-authority-preparation.js";
 import { executePluginOwnedProcess } from "./execute-plugin.js";
 import { closePluginTestAdmissions, createExecution } from "./execute-plugin.test-support.js";
@@ -305,10 +308,17 @@ it("steers configured, session and explicit inputs through current authority int
               throw new Error("Expected worker-prepared Claude input");
             },
             prepareCurrent: async () => {
-              const current = await resolveFollowupRunToolAuthorityFingerprintAsync(followupRun);
-              if (current !== fingerprint) {
-                throw new Error("Incoming policy was revoked");
+              const read = await prepareReplyToolAuthorityCallerRead(
+                operation.projectToolAuthorityFingerprintAsync,
+                undefined,
+                fingerprint,
+                followupRun.run,
+                () => operation.abortSignal.throwIfAborted(),
+              );
+              if (!read) {
+                throw new Error("Claude input requires a worker-prepared policy read");
               }
+              await read.prepareCurrent();
             },
           }),
         ),

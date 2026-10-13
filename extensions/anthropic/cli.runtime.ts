@@ -88,7 +88,8 @@ type ClaudeCliTurn = {
 type ClaudeCliSession = {
   handle: CliBackendLiveSessionHandle;
   capability?: CliBackendLiveSessionCapability;
-  transport?: ReturnType<typeof createClaudeCliTransport>;
+  transport?: Awaited<ReturnType<typeof createClaudeCliTransport>>;
+  transportStartup?: ReturnType<typeof createClaudeCliTransport>;
   currentTurn?: ClaudeCliTurn;
   idleTimer?: ReturnType<typeof setTimeout>;
   hasInputLifecycle: boolean;
@@ -529,7 +530,10 @@ function createSession(capability?: CliBackendLiveSessionCapability): ClaudeCliS
       fingerprint: capability?.fingerprint ?? randomUUID(),
       isIdle: () => !session.closed && !session.currentTurn,
       close: (_reason, error) => closeSession(session, error),
-      waitForExit: () => session.transport?.waitForExit() ?? Promise.resolve(),
+      waitForExit: async () => {
+        const transport = session.transport ?? (await session.transportStartup);
+        await transport?.waitForExit();
+      },
     },
   };
   sessions.set(session.handle, session);
@@ -585,9 +589,10 @@ export async function* executeClaudeCli(
     context.abortSignal?.throwIfAborted();
     // Adopt the process's exact MCP capture before prompt dispatch or native tool callbacks.
     capability?.activate(session.handle);
-    if (!session.transport) {
+    let transport = session.transport;
+    if (!transport) {
       const { args, excludeDynamicSections } = prepareClaudeCliTransportArgs(context);
-      session.transport = createClaudeCliTransport({
+      session.transportStartup = createClaudeCliTransport({
         context,
         args,
         secretInput,
@@ -631,14 +636,24 @@ export async function* executeClaudeCli(
           };
         },
         onError: (error) => session.handle.close("abort", error),
+      }).then((created) => {
+        session.transport = created;
+        if (session.closed) {
+          created.close();
+        }
+        return created;
       });
-      await session.transport.initialize();
+      transport = await session.transportStartup;
+      if (session.closed) {
+        throw turn.error ?? new Error("Claude CLI closed during startup.");
+      }
+      await transport.initialize();
     }
     context.assertCurrent?.();
     if (session.closed || session.currentTurn !== turn) {
       throw turn.error ?? new Error("Claude CLI closed before its prompt was accepted.");
     }
-    await session.transport.send(createUserInput(context, context.prompt, turn.inputUuid));
+    await transport.send(createUserInput(context, context.prompt, turn.inputUuid));
     context.registerMessageInjection?.({
       isAvailable: () =>
         session.hasInputLifecycle &&
@@ -658,7 +673,7 @@ export async function* executeClaudeCli(
     }
   } catch (error) {
     session.handle.close("abort", error);
-    throw error;
+    throw turn.error ?? error;
   } finally {
     turn.controller.abort();
     context.abortSignal?.removeEventListener("abort", abort);

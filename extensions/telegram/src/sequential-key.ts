@@ -39,6 +39,17 @@ const TELEGRAM_READ_ONLY_COMMAND_KEYS = new Set([
 // writes must stay ordered behind their own topic's pending input. `/approve` belongs
 // here because the run that requested the approval is holding its own lane.
 const TELEGRAM_ACTIVE_RUN_CONTROL_COMMAND_KEYS = new Set(["approve", "queue", "steer"]);
+// Carried upstream PR #71563 (closed unmerged): /new and /reset must bypass the per-topic
+// sequential queue, otherwise they wait behind the running turn and never reset the session.
+const TELEGRAM_SESSION_CONTROL_COMMAND_KEYS = new Set(["new", "reset"]);
+
+export function isTelegramSessionControlCommand(params: {
+  rawText?: string;
+  botUsername?: string;
+}): boolean {
+  const key = resolveTelegramCommandKeyForControlLane(params);
+  return key !== undefined && TELEGRAM_SESSION_CONTROL_COMMAND_KEYS.has(key);
+}
 
 type TelegramSequentialKeyContext = {
   chat?: { id?: number };
@@ -127,6 +138,9 @@ export function isTelegramControlLaneText(params: {
     ? { botUsername: params.botUsername }
     : { targetedCommandMode: "pre-identity" as const };
   if (isAbortRequestText(params.rawText, abortCommandOptions)) {
+    return true;
+  }
+  if (isTelegramSessionControlCommand(params)) {
     return true;
   }
   const key = resolveTelegramCommandKeyForControlLane(params);

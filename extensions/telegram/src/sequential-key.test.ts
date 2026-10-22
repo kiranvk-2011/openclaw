@@ -91,14 +91,20 @@ describe("getTelegramSequentialKey", () => {
       { message: mockMessage({ chat: mockChat({ id: 123 }), text: "/steer do the thing" }) },
       "telegram:123:control",
     ],
-    // Session-mutating commands must not share the chat-wide control lane: their writes
-    // stay ordered behind their own topic's pending input, `activeRunSafe` notwithstanding.
-    [{ message: mockMessage({ chat: mockChat({ id: 123 }), text: "/new" }) }, "telegram:123"],
+    // Fleet carry of #71563: /new and /reset take the control lane so they are not stuck
+    // behind the running turn. Other session-mutating commands stay on their topic lane.
+    [
+      { message: mockMessage({ chat: mockChat({ id: 123 }), text: "/new" }) },
+      "telegram:123:control",
+    ],
     [
       { message: mockMessage({ chat: mockChat({ id: 123 }), text: "/new sync tars" }) },
-      "telegram:123",
+      "telegram:123:control",
     ],
-    [{ message: mockMessage({ chat: mockChat({ id: 123 }), text: "/reset" }) }, "telegram:123"],
+    [
+      { message: mockMessage({ chat: mockChat({ id: 123 }), text: "/reset" }) },
+      "telegram:123:control",
+    ],
     [
       { message: mockMessage({ chat: mockChat({ id: 123 }), text: "/think high" }) },
       "telegram:123",
@@ -113,7 +119,7 @@ describe("getTelegramSequentialKey", () => {
           text: "/new sync tars",
         }),
       },
-      "telegram:-100:topic:202",
+      "telegram:-100:control",
     ],
     [
       { message: mockMessage({ chat: mockChat({ id: 123 }), text: "/diagnostics" }) },

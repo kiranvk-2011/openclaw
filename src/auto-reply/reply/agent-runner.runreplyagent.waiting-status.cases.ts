@@ -277,6 +277,83 @@ export function registerWaitingStatusCases({
   );
 
   it.each([
+    { label: "progress-only", sentProgress: true, childState: "running" },
+    { label: "silent", sentProgress: false, childState: "running" },
+    { label: "progress-only", sentProgress: true, childState: "none" },
+  ] as const)(
+    "handles a $label turn while an earlier turn's child is $childState",
+    async ({ sentProgress, childState }) => {
+      const testState = await createOpenClawTestState({ label: "reply-owed-child" });
+      resetSubagentRegistryForTests({ persist: false });
+      onTestFinished(async () => {
+        resetSubagentRegistryForTests({ persist: false });
+        await testState.cleanup();
+      });
+      const progressTarget = {
+        tool: "message",
+        provider: "whatsapp",
+        to: "+15550001111",
+        text: "Still running, about 2 minutes in.",
+        sourceReplyFinal: false,
+      };
+      runEmbeddedAgentMock.mockImplementationOnce(
+        async (params: RunEmbeddedAgentInternalParams) => {
+          assert(params.preparedRunAdmission);
+          assert(params.sessionKey);
+          await params.preparedRunAdmission.admit("embedded");
+          if (childState === "running") {
+            // Spawned and yielded for by an earlier turn; it resumes this session when done.
+            await registerSubagentRun(
+              createSubagentRunParams({
+                runId: randomUUID(),
+                childSessionKey: "agent:main:subagent:earlier-child",
+                requesterSessionKey: params.sessionKey,
+                requesterAgentId: params.agentId,
+                requesterTurnRunId: "earlier-turn",
+                expectsCompletionMessage: true,
+                queued: true,
+              }),
+            );
+          }
+          return {
+            payloads: [],
+            meta: { durationMs: 0 },
+            ...(sentProgress
+              ? {
+                  didSendViaMessagingTool: true,
+                  messagingToolSentTexts: [progressTarget.text],
+                  messagingToolSentTargets: [progressTarget],
+                }
+              : {}),
+          };
+        },
+      );
+      const { run } = createMinimalRun({
+        opts: { sourceReplyDeliveryMode: "message_tool_only" },
+      });
+
+      const payloads = [await run()].flat().filter((payload) => payload !== undefined);
+
+      if (childState === "none") {
+        expect(payloads).toContainEqual(
+          expect.objectContaining({
+            text: expect.stringContaining("did not produce a visible reply"),
+            isError: true,
+          }),
+        );
+      } else if (sentProgress) {
+        expect(payloads).toEqual([]);
+      } else {
+        expect(payloads).toEqual([
+          expect.objectContaining({
+            text: "I’m continuing this work and will send the result when it is ready.",
+          }),
+        ]);
+      }
+    },
+  );
+
+  it.each([
     { label: "default status" },
     { label: "explicit status", acknowledgment: "Research started; results will follow." },
     {

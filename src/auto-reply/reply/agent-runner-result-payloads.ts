@@ -61,6 +61,7 @@ import { resolveResponseUsageLine } from "./agent-runner-usage-line.js";
 import type { PendingContinuationSettlement } from "./get-reply.types.js";
 import { attachMcpAppChannelAction, attachMcpConnectChannelAction } from "./mcp-channel-actions.js";
 import { normalizeReplyPayload } from "./normalize-reply.js";
+import { hasOwedRequesterChildCompletion } from "./owed-child-completion.js";
 import { resolveReplyOperationRunState } from "./reply-operation-run-state.js";
 import { replyRunRegistry } from "./reply-run-registry.js";
 import { createReplyToModeFilterForChannel } from "./reply-threading.js";
@@ -178,13 +179,25 @@ export async function prepareReplyAgentPayloads(state: {
       sourceReplyDeliveryState: runResult.sourceReplyDeliveryState,
     }),
   );
+  // A child spawned by an earlier turn still owes this session its result, so a
+  // progress-only turn is waiting for it rather than missing its reply.
+  const owedChildContinuation =
+    !blocked &&
+    !pendingContinuation &&
+    !terminalFailurePayload &&
+    sourceReplyDelivery === "missing" &&
+    terminalReplyExpectation === "required" &&
+    (await hasOwedRequesterChildCompletion({
+      sessionKey: sessionKey ?? followupRun.run.sessionKey,
+      agentId: followupRun.run.agentId,
+    }));
   let completion = resolveReplyCompletion(
     terminalReplyExpectation,
     blocked
       ? "blocked"
       : sourceReplyDelivery !== "missing"
         ? sourceReplyDelivery
-        : pendingContinuation
+        : pendingContinuation || owedChildContinuation
           ? "pending"
           : "empty",
   );
@@ -217,7 +230,7 @@ export async function prepareReplyAgentPayloads(state: {
     : buildWaitingStatusPayload({
         completion,
         yielded: runResult.meta?.yielded === true,
-        continuationPending: implicitContinuation,
+        continuationPending: implicitContinuation || owedChildContinuation,
         yieldAcknowledgment: runResult.meta?.yieldAcknowledgment,
         // Child spawns are side effects, not user-visible messages. They must not
         // suppress the explicit waiting reply for the parent turn.

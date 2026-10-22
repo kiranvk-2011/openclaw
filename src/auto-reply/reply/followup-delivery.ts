@@ -37,6 +37,7 @@ import { resolveFollowupDeliveryPayloads } from "./followup-delivery-payloads.js
 import type { AdmittedFollowupTurn, FollowupRunnerParams } from "./followup-turn-admission.js";
 import type { InternalGetReplyOptions } from "./get-reply.types.js";
 import { resolveOriginMessageProvider } from "./origin-routing.js";
+import { hasOwedRequesterChildCompletion } from "./owed-child-completion.js";
 import { warnPrivateMessageToolFinal } from "./private-message-tool-final.js";
 import { enqueueFollowupRun, resolveQueueSettings, type FollowupRun } from "./queue.js";
 import type { ReplyDispatchKind } from "./reply-dispatcher.types.js";
@@ -213,13 +214,27 @@ export async function resolveFollowupDeliveryDecision(params: {
       sourceReplyDeliveryState: result.sourceReplyDeliveryState,
     }),
   );
+  const blocked =
+    result.meta?.error?.kind === "hook_block" || result.didSendDeterministicApprovalPrompt === true;
+  // A child spawned by an earlier turn still owes this session its result, so a
+  // progress-only turn is waiting for it rather than missing its reply.
+  const owedChildContinuation =
+    !blocked &&
+    !pendingContinuation &&
+    !accounting.terminalFailurePayload &&
+    sourceReplyDelivery === "missing" &&
+    terminalReplyExpectation === "required" &&
+    (await hasOwedRequesterChildCompletion({
+      sessionKey: turn.session.kind === "session" ? turn.session.key : turn.queued.run.sessionKey,
+      agentId: turn.queued.run.agentId,
+    }));
   let completion = resolveReplyCompletion(
     terminalReplyExpectation,
-    result.meta?.error?.kind === "hook_block" || result.didSendDeterministicApprovalPrompt === true
+    blocked
       ? "blocked"
       : sourceReplyDelivery !== "missing"
         ? sourceReplyDelivery
-        : pendingContinuation
+        : pendingContinuation || owedChildContinuation
           ? "pending"
           : "empty",
   );
@@ -287,7 +302,7 @@ export async function resolveFollowupDeliveryDecision(params: {
   );
   const waitingStatusParams = {
     completion,
-    continuationPending: result.meta?.continuationPending === true,
+    continuationPending: result.meta?.continuationPending === true || owedChildContinuation,
     yielded: result.meta?.yielded === true,
     yieldAcknowledgment: result.meta?.yieldAcknowledgment,
     // Child spawns are side effects, not user-visible messages. They must not
